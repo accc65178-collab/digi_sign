@@ -12,12 +12,12 @@ from PyQt5.QtWidgets import (
     QFormLayout,
     QHBoxLayout,
     QLabel,
-    QListWidget,
     QListWidgetItem,
     QLineEdit,
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QSizePolicy,
     QTextEdit,
     QToolBar,
     QVBoxLayout,
@@ -28,6 +28,8 @@ from models.document import Document
 from models.user import User
 from services.comment_service import CommentService
 from services.workflow_service import WorkflowService
+from ui.components.comment_widget import CommentWidget
+from ui.components.signature_widget import SignatureWidget
 
 
 class _ChainDialog(QDialog):
@@ -42,7 +44,9 @@ class _ChainDialog(QDialog):
 
         self._users_combo = QComboBox(self)
         for u in self._workflow.list_users():
-            self._users_combo.addItem(f"{u.name} ({u.role})", u.id)
+            self._users_combo.addItem(f"{u.username} ({u.role})", u.id)
+
+        from PyQt5.QtWidgets import QListWidget
 
         self._list = QListWidget(self)
         for uid in initial_user_ids:
@@ -83,7 +87,7 @@ class _ChainDialog(QDialog):
 
     def _append_user(self, user_id: int) -> None:
         u = self._workflow.get_user(user_id)
-        label = str(user_id) if u is None else f"{u.name} ({u.role})"
+        label = str(user_id) if u is None else f"{u.username} ({u.role})"
         item = QListWidgetItem(label)
         item.setData(Qt.UserRole, int(user_id))
         self._list.addItem(item)
@@ -183,31 +187,37 @@ class EditorWindow(QMainWindow):
         btn_bar.addWidget(self._reject_btn)
 
         self._chain_label = QLabel("Approval: (not configured)")
+        self._chain_label.setObjectName("SectionTitle")
 
-        self._comment_input = QLineEdit(self)
-        self._comment_input.setPlaceholderText("Write a review comment...")
-        self._add_comment_btn = QPushButton("Add Comment")
-        self._add_comment_btn.clicked.connect(self.add_comment)
+        self._signature = SignatureWidget(self)
+        self._signature.signed.connect(self.sign_and_approve)
 
-        comment_bar = QHBoxLayout()
-        comment_bar.addWidget(self._comment_input)
-        comment_bar.addWidget(self._add_comment_btn)
-
-        self._comments_list = QListWidget(self)
+        self._comment_widget = CommentWidget(self._on_comment_added, self)
+        self._comment_widget.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
 
         form = QFormLayout()
         form.addRow("Title:", self._title)
 
+        left = QWidget(self)
+        left_layout = QVBoxLayout()
+        left_layout.addLayout(form)
+        left_layout.addWidget(self._editor)
+        left_layout.addLayout(btn_bar)
+        left.setLayout(left_layout)
+
+        right = QWidget(self)
+        right.setFixedWidth(340)
+        right_layout = QVBoxLayout()
+        right_layout.addWidget(self._chain_label)
+        right_layout.addWidget(self._signature)
+        right_layout.addWidget(self._comment_widget)
+        right.setLayout(right_layout)
+
         root = QWidget(self)
-        layout = QVBoxLayout()
-        layout.addLayout(form)
-        layout.addWidget(self._chain_label)
-        layout.addWidget(self._editor)
-        layout.addLayout(btn_bar)
-        layout.addWidget(QLabel("Comments"))
-        layout.addLayout(comment_bar)
-        layout.addWidget(self._comments_list)
-        root.setLayout(layout)
+        main_layout = QHBoxLayout()
+        main_layout.addWidget(left, 1)
+        main_layout.addWidget(right)
+        root.setLayout(main_layout)
         self.setCentralWidget(root)
 
         self.statusBar()
@@ -215,6 +225,7 @@ class EditorWindow(QMainWindow):
         self._update_status()
         self._refresh_chain_label()
         self._reload_comments()
+        self._refresh_signature_info()
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Formatting", self)
@@ -273,7 +284,7 @@ class EditorWindow(QMainWindow):
             assigned = "None"
         else:
             u = self._workflow.get_user(self._doc.assigned_to)
-            assigned = str(self._doc.assigned_to) if u is None else f"{u.name} ({u.role})"
+            assigned = str(self._doc.assigned_to) if u is None else f"{u.username} ({u.role})"
         self.statusBar().showMessage(f"Status: {self._doc.status} | Assigned to: {assigned} | {state}")
 
     def _on_changed(self) -> None:
@@ -287,8 +298,30 @@ class EditorWindow(QMainWindow):
         is_assignee = self._doc.assigned_to == self._current_user.id
         can_decide = is_assignee and self._doc.status == "Pending"
 
-        self._approve_btn.setVisible(can_decide)
-        self._reject_btn.setVisible(can_decide)
+        self._approve_btn.setEnabled(can_decide)
+        self._reject_btn.setEnabled(can_decide)
+        self._signature.set_enabled(can_decide)
+        self._refresh_signature_info()
+
+    def _refresh_signature_info(self) -> None:
+        if self._doc.id is None:
+            self._signature.set_info_text("Save the document to enable signing")
+            return
+
+        if self._doc.status != "Pending":
+            self._signature.set_info_text(f"Signing available when status is Pending (current: {self._doc.status})")
+            return
+
+        if self._doc.assigned_to is None:
+            self._signature.set_info_text("No approver assigned")
+            return
+
+        assignee = self._workflow.get_user(self._doc.assigned_to)
+        assignee_label = str(self._doc.assigned_to) if assignee is None else assignee.username
+        if self._doc.assigned_to == self._current_user.id:
+            self._signature.set_info_text(f"You can sign as {assignee_label}")
+        else:
+            self._signature.set_info_text(f"Only {assignee_label} can sign this step")
 
     def _refresh_chain_label(self) -> None:
         if self._doc.id is None:
@@ -298,7 +331,7 @@ class EditorWindow(QMainWindow):
             names = []
             for uid in self._pending_chain_user_ids:
                 u = self._workflow.get_user(uid)
-                names.append(str(uid) if u is None else u.name)
+                names.append(str(uid) if u is None else u.username)
             self._chain_label.setText("Approval: " + " → ".join(names))
             return
 
@@ -310,10 +343,10 @@ class EditorWindow(QMainWindow):
         parts = []
         for step in chain:
             u = self._workflow.get_user(step.user_id)
-            name = str(step.user_id) if u is None else u.name
+            name = str(step.user_id) if u is None else u.username
             label = f"{name}"
             if step.step_order == self._doc.current_step and self._doc.status == "Pending":
-                label = f"[{label}]"
+                label += " (current)"
             parts.append(label)
 
         self._chain_label.setText("Approval: " + " → ".join(parts))
@@ -411,6 +444,16 @@ class EditorWindow(QMainWindow):
         if self._doc.assigned_to != self._current_user.id:
             QMessageBox.warning(self, "Not allowed", "This document is not assigned to you.")
             return
+
+        res = QMessageBox.question(
+            self,
+            "Approve",
+            "Approve this step and move to the next approver?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if res != QMessageBox.Yes:
+            return
         try:
             self._doc = self._workflow.approve(self._doc)
         except Exception as exc:
@@ -427,6 +470,16 @@ class EditorWindow(QMainWindow):
         if self._doc.assigned_to != self._current_user.id:
             QMessageBox.warning(self, "Not allowed", "This document is not assigned to you.")
             return
+
+        res = QMessageBox.question(
+            self,
+            "Reject",
+            "Reject this document?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if res != QMessageBox.Yes:
+            return
         try:
             self._doc = self._workflow.reject(self._doc)
         except Exception as exc:
@@ -440,27 +493,29 @@ class EditorWindow(QMainWindow):
         self.saved.emit()
 
     def _reload_comments(self) -> None:
-        self._comments_list.clear()
+        lines: List[str] = []
         if self._doc.id is None:
+            self._comment_widget.set_comments(lines)
+            self._comment_widget.set_add_enabled(False)
             return
 
         try:
             comments = self._comments.list_comments(self._doc.id)
         except Exception:
+            self._comment_widget.set_comments(lines)
             return
 
         for c in comments:
             u = self._workflow.get_user(c.user_id)
-            name = str(c.user_id) if u is None else u.name
-            self._comments_list.addItem(f"{c.timestamp} - {name}: {c.comment}")
+            name = str(c.user_id) if u is None else u.username
+            lines.append(f"{c.timestamp} - {name}: {c.comment}")
 
-    def add_comment(self) -> None:
+        self._comment_widget.set_comments(lines)
+        self._comment_widget.set_add_enabled(True)
+
+    def _on_comment_added(self, text: str) -> None:
         if self._doc.id is None:
             QMessageBox.warning(self, "Comments", "Save the document before adding comments.")
-            return
-
-        text = self._comment_input.text().strip()
-        if not text:
             return
 
         try:
@@ -469,5 +524,31 @@ class EditorWindow(QMainWindow):
             QMessageBox.critical(self, "Failed", str(exc))
             return
 
-        self._comment_input.clear()
         self._reload_comments()
+
+    def sign_and_approve(self) -> None:
+        if self._doc.id is None:
+            QMessageBox.warning(self, "Sign", "Save the document before signing.")
+            return
+
+        if not (self._doc.status == "Pending" and self._doc.assigned_to == self._current_user.id):
+            QMessageBox.warning(self, "Sign", "You can only sign documents assigned to you.")
+            return
+
+        res = QMessageBox.question(
+            self,
+            "Sign",
+            "Add your digital signature and approve this step?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if res != QMessageBox.Yes:
+            return
+
+        signature_html = SignatureWidget.signature_html(user_name=self._current_user.username)
+        self._editor.moveCursor(self._editor.textCursor().End)
+        self._editor.insertHtml(signature_html)
+        self._sync_doc_from_ui()
+        self.save()
+        if self._doc.assigned_to == self._current_user.id and self._doc.status == "Pending":
+            self.approve()

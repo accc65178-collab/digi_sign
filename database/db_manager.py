@@ -31,9 +31,28 @@ class DbManager:
                 CREATE TABLE IF NOT EXISTS users (
                     id INTEGER PRIMARY KEY,
                     name TEXT NOT NULL,
-                    role TEXT NOT NULL
+                    role TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'Approved'
                 )
                 """
+            )
+
+            # Migration: add auth/status columns if the database was created before they existed.
+            user_cols = conn.execute("PRAGMA table_info(users)").fetchall()
+            user_col_names = {row["name"] for row in user_cols}
+            if "status" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN status TEXT NOT NULL DEFAULT 'Approved'")
+            if "username" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
+            if "password_hash" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+
+            conn.execute("UPDATE users SET status = 'Approved' WHERE status IS NULL OR status = ''")
+
+            # Backfill username from legacy name.
+            # Note: Keep legacy name column for compatibility with already-created DBs.
+            conn.execute(
+                "UPDATE users SET username = LOWER(REPLACE(name, ' ', '')) WHERE username IS NULL OR username = ''"
             )
             conn.execute(
                 """
@@ -87,28 +106,144 @@ class DbManager:
 
             user_count = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
             if user_count == 0:
+                try:
+                    import bcrypt  # type: ignore
+                except ModuleNotFoundError as e:
+                    raise RuntimeError("bcrypt is required. Install with: pip install bcrypt") from e
+
+                def _hash(pw: str) -> str:
+                    return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+
                 conn.executemany(
-                    "INSERT INTO users(name, role) VALUES(?, ?)",
+                    "INSERT INTO users(name, role, status, username, password_hash) VALUES(?, ?, ?, ?, ?)",
                     [
-                        ("Admin", "Admin"),
-                        ("Manager", "Manager"),
-                        ("Officer", "Officer"),
+                        ("Admin", "Admin", "Approved", "admin", _hash("admin")),
+                        ("Manager", "Normal", "Approved", "manager", _hash("manager")),
+                        ("Officer", "Normal", "Approved", "officer", _hash("officer")),
                     ],
                 )
+            else:
+                # Ensure any existing users have a password_hash. Use a temporary default equal to username.
+                # Admin can later change this once a proper UI exists.
+                try:
+                    import bcrypt  # type: ignore
+                except ModuleNotFoundError:
+                    bcrypt = None
+
+                if bcrypt is not None:
+                    rows = conn.execute(
+                        "SELECT id, username, password_hash FROM users WHERE password_hash IS NULL OR password_hash = ''"
+                    ).fetchall()
+                    for r in rows:
+                        username = r["username"] or "user"
+                        ph = bcrypt.hashpw(username.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+                        conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (ph, r["id"]))
 
     def list_users(self) -> List[User]:
         with self._connect() as conn:
-            rows = conn.execute("SELECT id, name, role FROM users ORDER BY id").fetchall()
-        return [User(id=row["id"], name=row["name"], role=row["role"]) for row in rows]
+            rows = conn.execute(
+                "SELECT id, username, password_hash, role, status FROM users ORDER BY id"
+            ).fetchall()
+        return [
+            User(
+                id=row["id"],
+                username=row["username"],
+                password_hash=row["password_hash"],
+                role=row["role"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
 
     def get_user(self, user_id: int) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, name, role FROM users WHERE id = ?", (user_id,)
+                "SELECT id, username, password_hash, role, status FROM users WHERE id = ?",
+                (user_id,),
             ).fetchone()
         if row is None:
             return None
-        return User(id=row["id"], name=row["name"], role=row["role"])
+        return User(
+            id=row["id"],
+            username=row["username"],
+            password_hash=row["password_hash"],
+            role=row["role"],
+            status=row["status"],
+        )
+
+    def get_user_by_username(self, username: str) -> Optional[User]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT id, username, password_hash, role, status FROM users WHERE username = ?",
+                (username,),
+            ).fetchone()
+        if row is None:
+            return None
+        return User(
+            id=row["id"],
+            username=row["username"],
+            password_hash=row["password_hash"],
+            role=row["role"],
+            status=row["status"],
+        )
+
+    def create_user(self, *, username: str, password_hash: str, role: str, status: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO users(name, username, password_hash, role, status) VALUES(?, ?, ?, ?, ?)",
+                (username, username, password_hash, role, status),
+            )
+            return int(cur.lastrowid)
+
+    def update_user_status(self, *, user_id: int, status: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET status = ? WHERE id = ?", (status, user_id))
+
+    def list_users_by_status(self, status: str) -> List[User]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, username, password_hash, role, status FROM users WHERE status = ? ORDER BY id",
+                (status,),
+            ).fetchall()
+        return [
+            User(
+                id=row["id"],
+                username=row["username"],
+                password_hash=row["password_hash"],
+                role=row["role"],
+                status=row["status"],
+            )
+            for row in rows
+        ]
+
+    def can_delete_user(self, user_id: int) -> bool:
+        with self._connect() as conn:
+            doc_ref = conn.execute(
+                "SELECT 1 FROM documents WHERE created_by = ? OR assigned_to = ? LIMIT 1",
+                (user_id, user_id),
+            ).fetchone()
+            if doc_ref is not None:
+                return False
+
+            chain_ref = conn.execute(
+                "SELECT 1 FROM approval_chain WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if chain_ref is not None:
+                return False
+
+            comment_ref = conn.execute(
+                "SELECT 1 FROM comments WHERE user_id = ? LIMIT 1",
+                (user_id,),
+            ).fetchone()
+            if comment_ref is not None:
+                return False
+
+        return True
+
+    def delete_user(self, user_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
     def create_document(self, doc: Document) -> int:
         with self._connect() as conn:

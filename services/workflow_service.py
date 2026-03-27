@@ -15,6 +15,65 @@ class WorkflowService:
     def list_users(self) -> List[User]:
         return self._db.list_users()
 
+    def list_approved_users(self) -> List[User]:
+        return self._db.list_users_by_status("Approved")
+
+    def list_pending_users(self) -> List[User]:
+        return self._db.list_users_by_status("Pending")
+
+    def signup_user(self, *, username: str, password: str, role: str) -> User:
+        try:
+            import bcrypt  # type: ignore
+        except ModuleNotFoundError as e:
+            raise RuntimeError("bcrypt is required. Install with: pip install bcrypt") from e
+
+        if not username:
+            raise ValueError("Username is required")
+        if not password:
+            raise ValueError("Password is required")
+
+        existing = self._db.get_user_by_username(username)
+        if existing is not None:
+            raise ValueError("Username already exists")
+
+        password_hash = bcrypt.hashpw(password.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
+        new_id = self._db.create_user(username=username, password_hash=password_hash, role=role, status="Pending")
+        user = self._db.get_user(new_id)
+        if user is None:
+            raise RuntimeError("Failed to create user")
+        return user
+
+    def authenticate(self, *, username: str, password: str) -> Optional[User]:
+        try:
+            import bcrypt  # type: ignore
+        except ModuleNotFoundError as e:
+            raise RuntimeError("bcrypt is required. Install with: pip install bcrypt") from e
+
+        user = self._db.get_user_by_username(username)
+        if user is None:
+            return None
+        if user.status != "Approved":
+            return None
+
+        try:
+            ok = bcrypt.checkpw(password.encode("utf-8"), user.password_hash.encode("utf-8"))
+        except Exception:
+            return None
+
+        return user if ok else None
+
+    def approve_user(self, user_id: int) -> None:
+        self._db.update_user_status(user_id=user_id, status="Approved")
+
+    def reject_user(self, user_id: int) -> None:
+        self._db.update_user_status(user_id=user_id, status="Rejected")
+
+    def can_delete_user(self, user_id: int) -> bool:
+        return self._db.can_delete_user(user_id)
+
+    def delete_user(self, user_id: int) -> None:
+        self._db.delete_user(user_id)
+
     def get_user(self, user_id: int) -> Optional[User]:
         return self._db.get_user(user_id)
 

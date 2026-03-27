@@ -14,6 +14,10 @@ from ui.login import LoginDialog
 def main() -> int:
     app = QApplication(sys.argv)
 
+    qss_path = Path(__file__).resolve().parent / "ui" / "styles.qss"
+    if qss_path.exists():
+        app.setStyleSheet(qss_path.read_text(encoding="utf-8"))
+
     db_path = Path(__file__).resolve().parent / "documents" / "app.db"
     db = DbManager(DbConfig(db_path=db_path))
     db.init_db()
