@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import List, Optional
 
 from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QFont, QTextCharFormat
+from PyQt5.QtGui import QFont, QPixmap, QTextCharFormat
 from PyQt5.QtWidgets import (
     QAction,
     QComboBox,
@@ -24,7 +25,7 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from models.document import Document
+from models.document import Document, _load_ref_body_html
 from models.user import User
 from services.comment_service import CommentService
 from services.workflow_service import WorkflowService
@@ -44,7 +45,7 @@ class _ChainDialog(QDialog):
 
         self._users_combo = QComboBox(self)
         for u in self._workflow.list_users():
-            self._users_combo.addItem(f"{u.username} ({u.role})", u.id)
+            self._users_combo.addItem(u.display_label(), u.id)
 
         from PyQt5.QtWidgets import QListWidget
 
@@ -87,7 +88,7 @@ class _ChainDialog(QDialog):
 
     def _append_user(self, user_id: int) -> None:
         u = self._workflow.get_user(user_id)
-        label = str(user_id) if u is None else f"{u.username} ({u.role})"
+        label = str(user_id) if u is None else u.display_label()
         item = QListWidgetItem(label)
         item.setData(Qt.UserRole, int(user_id))
         self._list.addItem(item)
@@ -122,6 +123,71 @@ class _ChainDialog(QDialog):
         return out
 
 
+class _LetterPreviewDialog(QDialog):
+    def __init__(self, doc: Document, parent=None) -> None:
+        super().__init__(parent)
+        self._doc = doc
+        self.setWindowTitle("Letter Preview")
+        self.setModal(True)
+        self.resize(800, 900)
+
+        # Build HTML for preview (header + subject + body)
+        header_path = Path(__file__).resolve().parents[1] / "documents" / "header.png"
+        header_html = ""
+        if header_path.exists():
+            header_html = f"<div style='text-align:center; margin-bottom:12px;'><img src='{header_path.as_uri()}' style='max-width:100%; height:auto;'/></div>"
+
+        subject_html = f"<div style='margin-bottom:12px;'><b>Subject:</b> {doc.subject}</div>"
+        body_html = doc.content or ""
+        full_html = f"<html><body>{header_html}{subject_html}{body_html}</body></html>"
+
+        self._preview = QTextEdit(self)
+        self._preview.setAcceptRichText(True)
+        self._preview.setHtml(full_html)
+        self._preview.setReadOnly(True)
+
+        self._save_pdf_btn = QPushButton("Save PDF", self)
+        self._save_pdf_btn.clicked.connect(self._save_pdf)
+
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        btn_layout.addWidget(self._save_pdf_btn)
+
+        layout = QVBoxLayout()
+        layout.addWidget(self._preview)
+        layout.addLayout(btn_layout)
+        self.setLayout(layout)
+
+    def _save_pdf(self) -> None:
+        out_dir = Path.home() / "Documents"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = (self._doc.title or "Untitled").strip().replace("\\", "_").replace("/", "_")
+        out_path = out_dir / f"{safe_title}.pdf"
+
+        # Rebuild HTML for export (same as preview)
+        header_path = Path(__file__).resolve().parents[1] / "documents" / "header.png"
+        header_html = ""
+        if header_path.exists():
+            header_html = f"<div style='text-align:center; margin-bottom:12px;'><img src='{header_path.as_uri()}' style='max-width:100%; height:auto;'/></div>"
+        subject_html = f"<div style='margin-bottom:12px;'><b>Subject:</b> {self._doc.subject}</div>"
+        body_html = self._doc.content or ""
+        full_html = f"<html><body>{header_html}{subject_html}{body_html}</body></html>"
+
+        from PyQt5.QtGui import QTextDocument
+        from PyQt5.QtPrintSupport import QPrinter
+
+        doc_export = QTextDocument()
+        doc_export.setHtml(full_html)
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(str(out_path))
+        printer.setPageMargins(12, 12, 12, 12, QPrinter.Millimeter)
+        doc_export.print_(printer)
+
+        QMessageBox.information(self, "Saved", f"PDF saved to:\n{out_path}")
+
+
 class EditorWindow(QMainWindow):
     saved = pyqtSignal()
 
@@ -141,7 +207,8 @@ class EditorWindow(QMainWindow):
         self._doc: Document = document or Document(
             id=None,
             title="Untitled",
-            content="",
+            subject="",
+            content=_load_ref_body_html(),
             created_by=current_user.id,
             status="Draft",
             assigned_to=None,
@@ -153,26 +220,53 @@ class EditorWindow(QMainWindow):
 
         self.setWindowTitle(self._window_title())
         self.resize(1000, 700)
+        self.setWindowState(Qt.WindowMaximized)
+
+        self._header_label = QLabel(self)
+        self._header_label.setAlignment(Qt.AlignHCenter)
+        self._header_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self._header_label.setMinimumHeight(60)
+        self._header_label.setMaximumHeight(150)
+        header_path = Path(__file__).resolve().parents[1] / "documents" / "header.png"
+        if header_path.exists():
+            pm = QPixmap(str(header_path))
+            self._header_pixmap = pm
+            self._header_label.setPixmap(pm)
+        else:
+            self._header_pixmap = QPixmap()
+            self._header_label.setText("")
 
         self._title = QLineEdit(self)
         self._title.setText(self._doc.title)
 
+        self._subject = QLineEdit(self)
+        self._subject.setText(getattr(self._doc, 'subject', ''))
+        self._subject.setPlaceholderText("Enter subject")
+
         self._editor = QTextEdit(self)
         self._editor.setAcceptRichText(True)
         self._editor.setHtml(self._doc.content or "")
+        self._editor.setStyleSheet("background: #f8f9fa; color: #000000;")
+        # Force document text color
+        self._editor.document().setDefaultStyleSheet("body { color: #000000; }")
 
         self._title.textChanged.connect(self._on_changed)
+        self._subject.textChanged.connect(self._on_changed)
         self._editor.textChanged.connect(self._on_changed)
 
         self._create_toolbar()
 
         self._save_btn = QPushButton("Save")
+        self._view_btn = QPushButton("View Letter")
+        self._delete_btn = QPushButton("Delete")
         self._chain_btn = QPushButton("Approval Chain")
         self._send_btn = QPushButton("Send for Approval")
         self._approve_btn = QPushButton("Approve")
         self._reject_btn = QPushButton("Reject")
 
         self._save_btn.clicked.connect(self.save)
+        self._view_btn.clicked.connect(self._view_letter)
+        self._delete_btn.clicked.connect(self._delete_document)
         self._chain_btn.clicked.connect(self.configure_chain)
         self._send_btn.clicked.connect(self.send_for_approval)
         self._approve_btn.clicked.connect(self.approve)
@@ -180,6 +274,8 @@ class EditorWindow(QMainWindow):
 
         btn_bar = QHBoxLayout()
         btn_bar.addWidget(self._save_btn)
+        btn_bar.addWidget(self._view_btn)
+        btn_bar.addWidget(self._delete_btn)
         btn_bar.addWidget(self._chain_btn)
         btn_bar.addWidget(self._send_btn)
         btn_bar.addStretch(1)
@@ -197,10 +293,16 @@ class EditorWindow(QMainWindow):
 
         form = QFormLayout()
         form.addRow("Title:", self._title)
+        form.addRow("Subject:", self._subject)
+
+        body_label = QLabel("Body")
+        body_label.setObjectName("SectionTitle")
 
         left = QWidget(self)
         left_layout = QVBoxLayout()
         left_layout.addLayout(form)
+        left_layout.addWidget(self._header_label)
+        left_layout.addWidget(body_label)
         left_layout.addWidget(self._editor)
         left_layout.addLayout(btn_bar)
         left.setLayout(left_layout)
@@ -226,6 +328,73 @@ class EditorWindow(QMainWindow):
         self._refresh_chain_label()
         self._reload_comments()
         self._refresh_signature_info()
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if self._header_pixmap.isNull():
+            return
+        # Limit max width to keep image crisp and professional
+        max_w = 600
+        w = min(max_w, max(1, self._header_label.width()))
+        scaled = self._header_pixmap.scaledToWidth(w, Qt.SmoothTransformation)
+        self._header_label.setPixmap(scaled)
+
+    def _export_pdf_to_pc(self) -> None:
+        # Export a PDF to the user's Documents folder.
+        out_dir = Path.home() / "Documents"
+        out_dir.mkdir(parents=True, exist_ok=True)
+        safe_title = (self._doc.title or "Untitled").strip().replace("\\", "_").replace("/", "_")
+        out_path = out_dir / f"{safe_title}.pdf"
+
+        header_path = Path(__file__).resolve().parents[1] / "documents" / "header.png"
+        header_html = ""
+        if header_path.exists():
+            header_html = f"<div style='text-align:center; margin-bottom:12px;'><img src='{header_path.as_uri()}' style='max-width:100%; height:auto;'/></div>"
+
+        subject_html = f"<div style='margin-bottom:12px;'><b>Subject:</b> {self._doc.subject}</div>"
+        body_html = self._doc.content or ""
+
+        full_html = f"<html><body>{header_html}{subject_html}{body_html}</body></html>"
+
+        from PyQt5.QtGui import QTextDocument
+
+        doc = QTextDocument()
+        doc.setHtml(full_html)
+
+        from PyQt5.QtPrintSupport import QPrinter
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setOutputFormat(QPrinter.PdfFormat)
+        printer.setOutputFileName(str(out_path))
+        printer.setPageMargins(12, 12, 12, 12, QPrinter.Millimeter)
+        doc.print_(printer)
+
+    def _view_letter(self) -> None:
+        # Sync current UI values into the document model for preview/export
+        self._sync_doc_from_ui()
+        dlg = _LetterPreviewDialog(self._doc, self)
+        dlg.exec_()
+
+    def _delete_document(self) -> None:
+        if self._doc.id is None:
+            QMessageBox.information(self, "Info", "This document has not been saved yet.")
+            return
+        reply = QMessageBox.question(
+            self,
+            "Delete Document",
+            f"Are you sure you want to delete '{self._doc.title}'?\nThis action cannot be undone.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        try:
+            self._workflow.delete_document(self._doc.id)
+            QMessageBox.information(self, "Deleted", "Document deleted successfully.")
+            self.saved.emit()
+            self.close()
+        except Exception as exc:
+            QMessageBox.critical(self, "Delete failed", str(exc))
 
     def _create_toolbar(self) -> None:
         toolbar = QToolBar("Formatting", self)
@@ -317,7 +486,7 @@ class EditorWindow(QMainWindow):
             return
 
         assignee = self._workflow.get_user(self._doc.assigned_to)
-        assignee_label = str(self._doc.assigned_to) if assignee is None else assignee.username
+        assignee_label = str(self._doc.assigned_to) if assignee is None else assignee.display_label()
         if self._doc.assigned_to == self._current_user.id:
             self._signature.set_info_text(f"You can sign as {assignee_label}")
         else:
@@ -331,7 +500,7 @@ class EditorWindow(QMainWindow):
             names = []
             for uid in self._pending_chain_user_ids:
                 u = self._workflow.get_user(uid)
-                names.append(str(uid) if u is None else u.username)
+                names.append(str(uid) if u is None else u.display_label())
             self._chain_label.setText("Approval: " + " → ".join(names))
             return
 
@@ -343,7 +512,7 @@ class EditorWindow(QMainWindow):
         parts = []
         for step in chain:
             u = self._workflow.get_user(step.user_id)
-            name = str(step.user_id) if u is None else u.username
+            name = str(step.user_id) if u is None else u.display_label()
             label = f"{name}"
             if step.step_order == self._doc.current_step and self._doc.status == "Pending":
                 label += " (current)"
@@ -381,6 +550,7 @@ class EditorWindow(QMainWindow):
 
     def _sync_doc_from_ui(self) -> None:
         self._doc.title = self._title.text().strip() or "Untitled"
+        self._doc.subject = self._subject.text().strip()
         self._doc.content = self._editor.toHtml()
 
     def save(self) -> None:
@@ -391,6 +561,11 @@ class EditorWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.critical(self, "Save failed", str(exc))
             return
+
+        try:
+            self._export_pdf_to_pc()
+        except Exception as exc:
+            QMessageBox.warning(self, "Export failed", str(exc))
 
         if self._pending_chain_user_ids and self._doc.id is not None:
             try:

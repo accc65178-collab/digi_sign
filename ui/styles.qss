@@ -14,18 +14,23 @@ QWidget {
 }
 
 QLineEdit, QTextEdit {
-    background: #ffffff;
+    background: #f8f9fa;
+    color: #000000;
     border: 1px solid #d1d5db;
     border-radius: 6px;
     padding: 6px;
 }
 
-QLineEdit:focus, QTextEdit:focus {
-    border: 1px solid #3b82f6;
+QTextEdit {
+    background: #f8f9fa !important;
+    color: #000000 !important;
+    selection-background-color: #3b82f6;
 }
 
-QTextEdit {
-    selection-background-color: #3b82f6;
+/* Force dark text in any document viewport */
+QTextEdit#qt_editor {
+    background: #f8f9fa;
+    color: #000000;
 }
 
 QPushButton {
@@ -113,16 +118,17 @@ QPushButton#NavButton {
     border-radius: 10px;
     background: transparent;
     border: none;
-    color: #e5e7eb;
+    color: #000000 !important;
 }
 
 QPushButton#NavButton:hover {
     background: rgba(59, 130, 246, 0.18);
+    color: #000000 !important;
 }
 
 QPushButton#NavButton:checked {
     background: rgba(59, 130, 246, 0.30);
-    color: #ffffff;
+    color: #000000 !important;
 }
 
 QPushButton#NavButton[hasBadge="true"] {
@@ -161,6 +167,87 @@ QWidget#LoginCard {
     background: #ffffff;
     border: 1px solid #e5e7eb;
     border-radius: 14px;
+}
+
+QDialog#LoginDialog {
+    background: #0b1220;
+}
+
+QDialog#SignupDialog {
+    background: #0b1220;
+}
+
+QWidget#LoginBackground {
+    background-color: #0b1220;
+    border-image: url(ui/images/bg_login.jpg) 0 0 0 0 stretch stretch;
+}
+
+QWidget#LoginGlassCard {
+    background: rgba(17, 24, 39, 0.60);
+    border: 1px solid rgba(255, 255, 255, 0.22);
+    border-radius: 22px;
+}
+
+QLabel#LoginTitle {
+    color: #ffffff;
+    font-size: 20pt;
+    font-weight: 800;
+    letter-spacing: 1px;
+}
+
+QLabel#LoginSubtitle {
+    color: #d1d5db;
+    font-size: 10pt;
+    font-weight: 500;
+}
+
+QWidget#LoginGlassCard QLabel {
+    color: rgba(255, 255, 255, 0.85);
+    font-weight: 600;
+}
+
+QLineEdit#LoginInput {
+    background: transparent;
+    color: #ffffff;
+    border: none;
+    border-bottom: 1px solid rgba(255, 255, 255, 0.55);
+    border-radius: 0px;
+    padding: 10px 2px;
+}
+
+QLineEdit#LoginInput:focus {
+    border-bottom: 1px solid #93c5fd;
+}
+
+QCheckBox#RememberMe {
+    color: rgba(255, 255, 255, 0.85);
+}
+
+QPushButton#ForgotLink,
+QPushButton#RegisterLink {
+    background: transparent;
+    border: none;
+    color: #93c5fd;
+    padding: 0px;
+}
+
+QPushButton#ForgotLink:hover,
+QPushButton#RegisterLink:hover {
+    color: #bfdbfe;
+    text-decoration: underline;
+}
+
+QPushButton#LoginButton {
+    background: rgba(255, 255, 255, 0.92);
+    color: #0b1220;
+    border: none;
+    border-radius: 12px;
+    padding: 10px 16px;
+    font-weight: 800;
+}
+
+QPushButton#LoginButton:hover {
+    background: #ffffff;
 }
 
 QLabel#CardTitle {
@@ -213,4 +300,16 @@ QListWidget {
     border: 1px solid #e5e7eb;
     border-radius: 12px;
     padding: 4px;
+}
+
+/* Custom message box styling */
+QLabel#MsgIcon {
+    font-size: 28px;
+    color: #ffffff;
+}
+
+QLabel#MsgText {
+    color: #ffffff;
+    font-size: 11pt;
+    font-weight: 500;
 }

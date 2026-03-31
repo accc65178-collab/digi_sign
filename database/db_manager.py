@@ -46,8 +46,30 @@ class DbManager:
                 conn.execute("ALTER TABLE users ADD COLUMN username TEXT")
             if "password_hash" not in user_col_names:
                 conn.execute("ALTER TABLE users ADD COLUMN password_hash TEXT")
+            if "designation" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN designation TEXT")
+            if "enabled" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1")
+            # New fields for employee info
+            if "full_name" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT")
+            if "employee_id" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN employee_id TEXT")
+            if "department" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN department TEXT")
+            if "lab" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN lab TEXT")
 
             conn.execute("UPDATE users SET status = 'Approved' WHERE status IS NULL OR status = ''")
+
+            conn.execute("UPDATE users SET designation = '' WHERE designation IS NULL")
+
+            conn.execute("UPDATE users SET enabled = 1 WHERE enabled IS NULL")
+
+            conn.execute("UPDATE users SET full_name = name WHERE full_name IS NULL OR full_name = ''")
+            conn.execute("UPDATE users SET employee_id = '' WHERE employee_id IS NULL")
+            conn.execute("UPDATE users SET department = '' WHERE department IS NULL")
+            conn.execute("UPDATE users SET lab = '' WHERE lab IS NULL")
 
             # Backfill username from legacy name.
             # Note: Keep legacy name column for compatibility with already-created DBs.
@@ -75,6 +97,9 @@ class DbManager:
             col_names = {row["name"] for row in cols}
             if "current_step" not in col_names:
                 conn.execute("ALTER TABLE documents ADD COLUMN current_step INTEGER NOT NULL DEFAULT 0")
+            # Migration: add subject if the database was created before this column existed.
+            if "subject" not in col_names:
+                conn.execute("ALTER TABLE documents ADD COLUMN subject TEXT DEFAULT ''")
 
             conn.execute(
                 """
@@ -115,11 +140,11 @@ class DbManager:
                     return bcrypt.hashpw(pw.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
 
                 conn.executemany(
-                    "INSERT INTO users(name, role, status, username, password_hash) VALUES(?, ?, ?, ?, ?)",
+                    "INSERT INTO users(name, full_name, employee_id, department, lab, role, status, username, password_hash, designation, enabled) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     [
-                        ("Admin", "Admin", "Approved", "admin", _hash("admin")),
-                        ("Manager", "Normal", "Approved", "manager", _hash("manager")),
-                        ("Officer", "Normal", "Approved", "officer", _hash("officer")),
+                        ("Admin", "Admin", "", "", "", "Admin", "Approved", "admin", _hash("admin"), "Admin", 1),
+                        ("Manager", "Manager", "", "", "", "Manager", "Approved", "manager", _hash("manager"), "Manager", 1),
+                        ("Officer", "Officer", "", "", "", "Officer", "Approved", "officer", _hash("officer"), "Officer", 1),
                     ],
                 )
             else:
@@ -139,18 +164,39 @@ class DbManager:
                         ph = bcrypt.hashpw(username.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
                         conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (ph, r["id"]))
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS password_reset_requests (
+                    id INTEGER PRIMARY KEY,
+                    username TEXT NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    handled_at TEXT,
+                    handled_by INTEGER,
+                    FOREIGN KEY(handled_by) REFERENCES users(id)
+                )
+                """
+            )
+
     def list_users(self) -> List[User]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, username, password_hash, role, status FROM users ORDER BY id"
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users ORDER BY id"
             ).fetchall()
         return [
             User(
                 id=row["id"],
+                name=row["name"],
+                full_name=row["full_name"] if "full_name" in row.keys() else "",
+                employee_id=row["employee_id"] if "employee_id" in row.keys() else "",
+                department=row["department"] if "department" in row.keys() else "",
+                lab=row["lab"] if "lab" in row.keys() else "",
                 username=row["username"],
                 password_hash=row["password_hash"],
+                designation=row["designation"] or "",
                 role=row["role"],
                 status=row["status"],
+                enabled=bool(row["enabled"]),
             )
             for row in rows
         ]
@@ -158,40 +204,56 @@ class DbManager:
     def get_user(self, user_id: int) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, role, status FROM users WHERE id = ?",
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users WHERE id = ?",
                 (user_id,),
             ).fetchone()
         if row is None:
             return None
         return User(
             id=row["id"],
+            name=row["name"],
+            full_name=row["full_name"] if "full_name" in row.keys() else "",
+            employee_id=row["employee_id"] if "employee_id" in row.keys() else "",
+            department=row["department"] if "department" in row.keys() else "",
+            lab=row["lab"] if "lab" in row.keys() else "",
             username=row["username"],
             password_hash=row["password_hash"],
+            designation=row["designation"] or "",
             role=row["role"],
             status=row["status"],
+            enabled=bool(row["enabled"]),
         )
 
     def get_user_by_username(self, username: str) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, username, password_hash, role, status FROM users WHERE username = ?",
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
         if row is None:
             return None
         return User(
             id=row["id"],
+            name=row["name"],
+            full_name=row["full_name"] if "full_name" in row.keys() else "",
+            employee_id=row["employee_id"] if "employee_id" in row.keys() else "",
+            department=row["department"] if "department" in row.keys() else "",
+            lab=row["lab"] if "lab" in row.keys() else "",
             username=row["username"],
             password_hash=row["password_hash"],
+            designation=row["designation"] or "",
             role=row["role"],
             status=row["status"],
+            enabled=bool(row["enabled"]),
         )
 
-    def create_user(self, *, username: str, password_hash: str, role: str, status: str) -> int:
+    def create_user(
+        self, *, name: str, full_name: str, employee_id: str, department: str, lab: str, username: str, password_hash: str, designation: str, role: str, status: str, enabled: int = 1
+    ) -> int:
         with self._connect() as conn:
             cur = conn.execute(
-                "INSERT INTO users(name, username, password_hash, role, status) VALUES(?, ?, ?, ?, ?)",
-                (username, username, password_hash, role, status),
+                "INSERT INTO users(name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, int(enabled)),
             )
             return int(cur.lastrowid)
 
@@ -199,19 +261,79 @@ class DbManager:
         with self._connect() as conn:
             conn.execute("UPDATE users SET status = ? WHERE id = ?", (status, user_id))
 
+    def update_user_enabled(self, *, user_id: int, enabled: bool) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET enabled = ? WHERE id = ?", (1 if enabled else 0, user_id))
+
+    def update_user_password_hash(self, *, user_id: int, password_hash: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (password_hash, user_id))
+
     def list_users_by_status(self, status: str) -> List[User]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, username, password_hash, role, status FROM users WHERE status = ? ORDER BY id",
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users WHERE status = ? ORDER BY id",
                 (status,),
             ).fetchall()
         return [
             User(
                 id=row["id"],
+                name=row["name"],
+                full_name=row["full_name"] if "full_name" in row.keys() else "",
+                employee_id=row["employee_id"] if "employee_id" in row.keys() else "",
+                department=row["department"] if "department" in row.keys() else "",
+                lab=row["lab"] if "lab" in row.keys() else "",
                 username=row["username"],
                 password_hash=row["password_hash"],
+                designation=row["designation"] or "",
                 role=row["role"],
                 status=row["status"],
+                enabled=bool(row["enabled"]),
+            )
+            for row in rows
+        ]
+
+    def create_password_reset_request(self, *, username: str, requested_at: str) -> int:
+        with self._connect() as conn:
+            cur = conn.execute(
+                "INSERT INTO password_reset_requests(username, requested_at, status) VALUES(?, ?, 'Pending')",
+                (username, requested_at),
+            )
+            return int(cur.lastrowid)
+
+    def list_password_reset_requests(self, *, status: Optional[str] = None) -> List[sqlite3.Row]:
+        with self._connect() as conn:
+            if status:
+                return conn.execute(
+                    "SELECT id, username, requested_at, status, handled_at, handled_by FROM password_reset_requests WHERE status = ? ORDER BY id DESC",
+                    (status,),
+                ).fetchall()
+            return conn.execute(
+                "SELECT id, username, requested_at, status, handled_at, handled_by FROM password_reset_requests ORDER BY id DESC"
+            ).fetchall()
+
+    def update_password_reset_request(self, *, request_id: int, status: str, handled_at: str, handled_by: int) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE password_reset_requests SET status = ?, handled_at = ?, handled_by = ? WHERE id = ?",
+                (status, handled_at, handled_by, request_id),
+            )
+
+    def list_all_documents(self) -> List[Document]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT id, title, subject, content, created_by, status, assigned_to, current_step FROM documents ORDER BY id DESC"
+            ).fetchall()
+        return [
+            Document(
+                id=row["id"],
+                title=row["title"],
+                subject=row["subject"] if "subject" in row.keys() else "",
+                content=row["content"],
+                created_by=row["created_by"],
+                status=row["status"],
+                assigned_to=row["assigned_to"],
+                current_step=row["current_step"],
             )
             for row in rows
         ]
@@ -245,14 +367,18 @@ class DbManager:
         with self._connect() as conn:
             conn.execute("DELETE FROM users WHERE id = ?", (user_id,))
 
+    def delete_document(self, doc_id: int) -> None:
+        with self._connect() as conn:
+            conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
+
     def create_document(self, doc: Document) -> int:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO documents(title, content, created_by, status, assigned_to, current_step)
-                VALUES(?, ?, ?, ?, ?, ?)
+                INSERT INTO documents(title, subject, content, created_by, status, assigned_to, current_step)
+                VALUES(?, ?, ?, ?, ?, ?, ?)
                 """,
-                (doc.title, doc.content, doc.created_by, doc.status, doc.assigned_to, doc.current_step),
+                (doc.title, doc.subject, doc.content, doc.created_by, doc.status, doc.assigned_to, doc.current_step),
             )
             return int(cur.lastrowid)
 
@@ -264,13 +390,13 @@ class DbManager:
             conn.execute(
                 """
                 UPDATE documents
-                SET title = ?, content = ?, created_by = ?, status = ?, assigned_to = ?, current_step = ?
+                SET title = ?, subject = ?, content = ?, status = ?, assigned_to = ?, current_step = ?
                 WHERE id = ?
                 """,
                 (
                     doc.title,
+                    doc.subject,
                     doc.content,
-                    doc.created_by,
                     doc.status,
                     doc.assigned_to,
                     doc.current_step,
@@ -282,7 +408,7 @@ class DbManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, title, content, created_by, status, assigned_to, current_step
+                SELECT id, title, subject, content, created_by, status, assigned_to, current_step
                 FROM documents
                 WHERE id = ?
                 """,
@@ -294,6 +420,7 @@ class DbManager:
         return Document(
             id=row["id"],
             title=row["title"],
+            subject=row["subject"] if "subject" in row.keys() else "",
             content=row["content"],
             created_by=row["created_by"],
             status=row["status"],
@@ -305,7 +432,7 @@ class DbManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, title, content, created_by, status, assigned_to, current_step
+                SELECT id, title, subject, content, created_by, status, assigned_to, current_step
                 FROM documents
                 WHERE created_by = ?
                 ORDER BY id DESC
@@ -316,6 +443,7 @@ class DbManager:
             Document(
                 id=row["id"],
                 title=row["title"],
+                subject=row["subject"] if "subject" in row.keys() else "",
                 content=row["content"],
                 created_by=row["created_by"],
                 status=row["status"],
@@ -329,7 +457,7 @@ class DbManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, title, content, created_by, status, assigned_to, current_step
+                SELECT id, title, subject, content, created_by, status, assigned_to, current_step
                 FROM documents
                 WHERE assigned_to = ?
                 ORDER BY
@@ -347,6 +475,7 @@ class DbManager:
             Document(
                 id=row["id"],
                 title=row["title"],
+                subject=row["subject"] if "subject" in row.keys() else "",
                 content=row["content"],
                 created_by=row["created_by"],
                 status=row["status"],

@@ -6,8 +6,8 @@ from typing import Optional
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
+    QApplication,
     QAbstractItemView,
-    QHBoxLayout,
     QHBoxLayout,
     QLabel,
     QMainWindow,
@@ -31,6 +31,9 @@ from ui.components.sidebar import Sidebar, default_nav_items
 from ui.components.table_widget import TableWidget
 from ui.components.topbar import TopBar
 
+# Global flag to indicate the app should exit
+_should_exit = False
+
 
 @dataclass(frozen=True)
 class _RowRef:
@@ -44,9 +47,11 @@ class DashboardWindow(QMainWindow):
         self._workflow = workflow
         self._comments = comment_service
         self._current_user = current_user
+        self._logout_requested = False
 
-        self.setWindowTitle(f"Dashboard - {current_user.username} ({current_user.role})")
+        self.setWindowTitle(f"Dashboard - {current_user.display_label()}")
         self.resize(1100, 700)
+        self.setWindowState(Qt.WindowMaximized)
 
         root = QWidget(self)
         root.setObjectName("AppShell")
@@ -55,7 +60,7 @@ class DashboardWindow(QMainWindow):
         self._sidebar = Sidebar(default_nav_items(), self)
         self._sidebar.nav_changed.connect(self._on_nav_changed)
 
-        self._topbar = TopBar(f"{current_user.username} ({current_user.role})", self)
+        self._topbar = TopBar(current_user.display_label(), self)
         self._topbar.logout_requested.connect(self._logout)
         self._topbar.admin_requested.connect(self._open_admin)
         self._topbar.search_changed.connect(self._on_search_changed)
@@ -233,7 +238,7 @@ class DashboardWindow(QMainWindow):
         user = self._workflow.get_user(assigned_to)
         if user is None:
             return str(assigned_to)
-        return f"{user.username} ({user.role})"
+        return user.display_label()
 
     def _fill_table(self, table: QTableWidget, docs: list[Document], *, highlight_pending: bool = False) -> None:
         table.setRowCount(0)
@@ -304,12 +309,21 @@ class DashboardWindow(QMainWindow):
         return None
 
     def _logout(self) -> None:
+        self._logout_requested = True
         self.close()
+
+    def closeEvent(self, event) -> None:
+        # If the user clicked Logout, return to the login dialog.
+        # If the user clicked the window's X button, exit the application.
+        if not self._logout_requested:
+            global _should_exit
+            _should_exit = True
+        event.accept()
 
     def _open_admin(self) -> None:
         if self._current_user.role != "Admin":
             return
-        dlg = AdminPanelDialog(self._workflow, self)
+        dlg = AdminPanelDialog(self._workflow, self._current_user, self)
         dlg.exec_()
         self.refresh()
 
