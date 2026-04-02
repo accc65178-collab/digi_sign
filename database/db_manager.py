@@ -2,6 +2,7 @@ import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
+from datetime import datetime
 
 from models.approval_chain import ApprovalChainStep
 from models.comment import Comment
@@ -100,6 +101,9 @@ class DbManager:
             # Migration: add subject if the database was created before this column existed.
             if "subject" not in col_names:
                 conn.execute("ALTER TABLE documents ADD COLUMN subject TEXT DEFAULT ''")
+            # Migration: add created_at if the database was created before this column existed.
+            if "created_at" not in col_names:
+                conn.execute("ALTER TABLE documents ADD COLUMN created_at TEXT DEFAULT ''")
 
             conn.execute(
                 """
@@ -109,11 +113,18 @@ class DbManager:
                     user_id INTEGER NOT NULL,
                     step_order INTEGER NOT NULL,
                     status TEXT NOT NULL,
+                    signature_png BLOB,
                     FOREIGN KEY(document_id) REFERENCES documents(id),
                     FOREIGN KEY(user_id) REFERENCES users(id)
                 )
                 """
             )
+
+            # Migration: add signature_png to approval_chain if missing.
+            chain_cols = conn.execute("PRAGMA table_info(approval_chain)").fetchall()
+            chain_col_names = {row["name"] for row in chain_cols}
+            if "signature_png" not in chain_col_names:
+                conn.execute("ALTER TABLE approval_chain ADD COLUMN signature_png BLOB")
 
             conn.execute(
                 """
@@ -334,6 +345,7 @@ class DbManager:
                 status=row["status"],
                 assigned_to=row["assigned_to"],
                 current_step=row["current_step"],
+                created_at=row["created_at"] if "created_at" in row.keys() else "",
             )
             for row in rows
         ]
@@ -372,13 +384,25 @@ class DbManager:
             conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
     def create_document(self, doc: Document) -> int:
+        created_at = (doc.created_at or "").strip()
+        if not created_at:
+            created_at = datetime.now().isoformat(timespec="seconds")
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO documents(title, subject, content, created_by, status, assigned_to, current_step)
-                VALUES(?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO documents(title, subject, content, created_by, status, assigned_to, current_step, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (doc.title, doc.subject, doc.content, doc.created_by, doc.status, doc.assigned_to, doc.current_step),
+                (
+                    doc.title,
+                    doc.subject,
+                    doc.content,
+                    doc.created_by,
+                    doc.status,
+                    doc.assigned_to,
+                    doc.current_step,
+                    created_at,
+                ),
             )
             return int(cur.lastrowid)
 
@@ -408,7 +432,7 @@ class DbManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, title, subject, content, created_by, status, assigned_to, current_step
+                SELECT id, title, subject, content, created_by, status, assigned_to, current_step, created_at
                 FROM documents
                 WHERE id = ?
                 """,
@@ -426,13 +450,14 @@ class DbManager:
             status=row["status"],
             assigned_to=row["assigned_to"],
             current_step=row["current_step"],
+            created_at=row["created_at"] if "created_at" in row.keys() else "",
         )
 
     def list_documents_created_by(self, user_id: int) -> List[Document]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, title, subject, content, created_by, status, assigned_to, current_step
+                SELECT id, title, subject, content, created_by, status, assigned_to, current_step, created_at
                 FROM documents
                 WHERE created_by = ?
                 ORDER BY id DESC
@@ -449,15 +474,38 @@ class DbManager:
                 status=row["status"],
                 assigned_to=row["assigned_to"],
                 current_step=row["current_step"],
+                created_at=row["created_at"] if "created_at" in row.keys() else "",
             )
             for row in rows
         ]
+
+    def count_documents_on_date(self, *, iso_date: str) -> int:
+        date_prefix = (iso_date or "").strip()
+        if not date_prefix:
+            raise ValueError("iso_date is required")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM documents WHERE created_at LIKE ?",
+                (f"{date_prefix}%",),
+            ).fetchone()
+        return int(row["c"])
+
+    def daily_sequence_for_document(self, *, doc_id: int, iso_date: str) -> int:
+        date_prefix = (iso_date or "").strip()
+        if not date_prefix:
+            raise ValueError("iso_date is required")
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS c FROM documents WHERE created_at LIKE ? AND id <= ?",
+                (f"{date_prefix}%", int(doc_id)),
+            ).fetchone()
+        return int(row["c"])
 
     def list_documents_assigned_to(self, user_id: int) -> List[Document]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, title, subject, content, created_by, status, assigned_to, current_step
+                SELECT id, title, subject, content, created_by, status, assigned_to, current_step, created_at
                 FROM documents
                 WHERE assigned_to = ?
                 ORDER BY
@@ -490,17 +538,17 @@ class DbManager:
             conn.execute("DELETE FROM approval_chain WHERE document_id = ?", (document_id,))
             conn.executemany(
                 """
-                INSERT INTO approval_chain(document_id, user_id, step_order, status)
-                VALUES(?, ?, ?, ?)
+                INSERT INTO approval_chain(document_id, user_id, step_order, status, signature_png)
+                VALUES(?, ?, ?, ?, ?)
                 """,
-                [(document_id, uid, idx, "Pending") for idx, uid in enumerate(user_ids)],
+                [(document_id, uid, idx, "Pending", None) for idx, uid in enumerate(user_ids)],
             )
 
     def list_approval_chain(self, document_id: int) -> List[ApprovalChainStep]:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, document_id, user_id, step_order, status
+                SELECT id, document_id, user_id, step_order, status, signature_png
                 FROM approval_chain
                 WHERE document_id = ?
                 ORDER BY step_order ASC
@@ -514,6 +562,7 @@ class DbManager:
                 user_id=row["user_id"],
                 step_order=row["step_order"],
                 status=row["status"],
+                signature_png=row["signature_png"],
             )
             for row in rows
         ]
@@ -522,7 +571,7 @@ class DbManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, document_id, user_id, step_order, status
+                SELECT id, document_id, user_id, step_order, status, signature_png
                 FROM approval_chain
                 WHERE document_id = ? AND step_order = ?
                 """,
@@ -536,7 +585,19 @@ class DbManager:
             user_id=row["user_id"],
             step_order=row["step_order"],
             status=row["status"],
+            signature_png=row["signature_png"],
         )
+
+    def update_approval_step_signature(self, *, document_id: int, step_order: int, signature_png: bytes) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                """
+                UPDATE approval_chain
+                SET signature_png = ?
+                WHERE document_id = ? AND step_order = ?
+                """,
+                (signature_png, document_id, step_order),
+            )
 
     def update_approval_step_status(self, *, document_id: int, step_order: int, status: str) -> None:
         with self._connect() as conn:

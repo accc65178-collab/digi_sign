@@ -20,33 +20,8 @@ class Document:
     status: str
     assigned_to: Optional[int]
     current_step: int
+    created_at: str = ""
 
 
 def _load_ref_body_html() -> str:
-    template_path = Path(__file__).resolve().parent.parent / "documents" / "REF.docx"
-    if not template_path.exists():
-        return ""
-    if DocxDocument is None:
-        return ""
-    try:
-        doc = DocxDocument(str(template_path))
-        body_parts = ["<div style='font-family: Arial, sans-serif;'>"]
-        for para in doc.paragraphs:
-            txt = para.text.strip()
-            if not txt:
-                body_parts.append("<br/>")
-            else:
-                style = ""
-                for run in para.runs:
-                    if run.bold:
-                        style += "font-weight:bold; "
-                    if run.italic:
-                        style += "font-style:italic; "
-                if style:
-                    body_parts.append(f"<p style='{style}'>{txt}</p>")
-                else:
-                    body_parts.append(f"<p>{txt}</p>")
-        body_parts.append("</div>")
-        return "\n".join(body_parts)
-    except Exception:
-        return ""
+    return ""

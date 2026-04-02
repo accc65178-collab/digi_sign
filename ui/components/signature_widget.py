@@ -13,6 +13,7 @@ class SignatureWidget(QWidget):
         super().__init__(parent)
 
         self._info = QLabel("Not signed")
+        self._info.hide()
         self._btn = QPushButton("Sign")
         self._btn.clicked.connect(self.signed.emit)
 
@@ -27,13 +28,12 @@ class SignatureWidget(QWidget):
         self._btn.setEnabled(enabled)
 
     def set_info_text(self, text: str) -> None:
-        self._info.setText(text)
+        # Info text is intentionally hidden in the UI.
+        if self._info.isVisible():
+            self._info.setText(text)
 
     @staticmethod
     def signature_html(*, user_name: str) -> str:
-        ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        return (
-            "<hr/>"
-            f"<p><b>Approved by {user_name}</b><br/>"
-            f"<span style='color:#666'>Timestamp: {ts}</span></p>"
-        )
+        _ = datetime.now()  # keep import stable; no text should be inserted into letter
+        _ = user_name
+        return ""

@@ -9,3 +9,4 @@ class ApprovalChainStep:
     user_id: int
     step_order: int
     status: str
+    signature_png: Optional[bytes] = None

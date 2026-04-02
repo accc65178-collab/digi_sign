@@ -144,6 +144,7 @@ class WorkflowService:
             status="Draft",
             assigned_to=None,
             current_step=0,
+            created_at=datetime.now().isoformat(timespec="seconds"),
         )
         new_id = self._db.create_document(doc)
         doc.id = new_id
@@ -151,12 +152,21 @@ class WorkflowService:
 
     def save_document(self, doc: Document) -> Document:
         if doc.id is None:
+            if not (doc.created_at or "").strip():
+                doc.created_at = datetime.now().isoformat(timespec="seconds")
             new_id = self._db.create_document(doc)
             doc.id = new_id
             return doc
 
+        if not (doc.created_at or "").strip():
+            doc.created_at = datetime.now().isoformat(timespec="seconds")
         self._db.update_document(doc)
         return doc
+
+    def daily_sequence_for_document(self, *, document_id: Optional[int], iso_date: str) -> int:
+        if document_id is not None:
+            return self._db.daily_sequence_for_document(doc_id=int(document_id), iso_date=iso_date)
+        return self._db.count_documents_on_date(iso_date=iso_date) + 1
 
     def get_document(self, doc_id: int) -> Optional[Document]:
         return self._db.get_document(doc_id)
@@ -197,6 +207,9 @@ class WorkflowService:
 
     def get_approval_chain(self, document_id: int) -> List[ApprovalChainStep]:
         return self._db.list_approval_chain(document_id)
+
+    def set_approval_step_signature(self, *, document_id: int, step_order: int, signature_png: bytes) -> None:
+        self._db.update_approval_step_signature(document_id=document_id, step_order=step_order, signature_png=signature_png)
 
     def send_for_approval(self, doc: Document) -> Document:
         if doc.id is None:
