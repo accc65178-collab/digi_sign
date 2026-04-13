@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+import shutil
 from datetime import datetime
 from typing import List, Optional
 
@@ -131,6 +133,12 @@ class WorkflowService:
     def get_user(self, user_id: int) -> Optional[User]:
         return self._db.get_user(user_id)
 
+    def get_user_signature_png(self, *, user_id: int) -> Optional[bytes]:
+        return self._db.get_user_signature_png(user_id=user_id)
+
+    def set_user_signature_png(self, *, user_id: int, signature_png: Optional[bytes]) -> None:
+        self._db.set_user_signature_png(user_id=user_id, signature_png=signature_png)
+
     def get_user_by_username(self, username: str) -> Optional[User]:
         return self._db.get_user_by_username(username)
 
@@ -200,6 +208,9 @@ class WorkflowService:
     def pending_for_me(self, user_id: int) -> List[Document]:
         return self._db.list_documents_assigned_to(user_id)
 
+    def documents_approved_by_me(self, user_id: int) -> List[Document]:
+        return self._db.list_documents_approved_by_user(user_id)
+
     def set_approval_chain(self, *, document_id: int, user_ids_in_order: List[int]) -> None:
         if not user_ids_in_order:
             raise ValueError("Approval chain cannot be empty")
@@ -268,3 +279,25 @@ class WorkflowService:
         doc.assigned_to = None
         self._db.update_document(doc)
         return doc
+
+    def get_setting(self, key: str, default: str = "") -> str:
+        return self._db.get_setting(key, default)
+
+    def update_setting(self, key: str, value: str) -> None:
+        self._db.update_setting(key, value)
+
+    def upload_template(self, source_path: str) -> None:
+        if not os.path.exists(source_path):
+            raise FileNotFoundError(f"Source template not found: {source_path}")
+        
+        # Determine the target template location
+        # Usually e:\new_sign\digi_sign\letterhead\REF.docx
+        target_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "letterhead")
+        if not os.path.exists(target_dir):
+            os.makedirs(target_dir)
+            
+        target_path = os.path.join(target_dir, "REF.docx")
+        shutil.copy2(source_path, target_path)
+
+    def update_user_role(self, user_id: int, role: str) -> None:
+        self._db.update_user_role(user_id, role)

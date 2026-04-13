@@ -23,7 +23,7 @@ class SignupDialog(QDialog):
 
         self._workflow = workflow
 
-        self.setWindowTitle("Sign up")
+        self.setWindowTitle("Signix - Sign up")
         self.setModal(True)
         self.resize(520, 640)
 
@@ -49,7 +49,7 @@ class SignupDialog(QDialog):
         self._employee_id.setObjectName("LoginInput")
 
         self._department = QLineEdit(self._card)
-        self._department.setPlaceholderText("Department")
+        self._department.setPlaceholderText("Directorate")
         self._department.setObjectName("LoginInput")
 
         self._lab = QLineEdit(self._card)
@@ -82,7 +82,7 @@ class SignupDialog(QDialog):
         card_layout.addWidget(self._full_name)
         card_layout.addWidget(QLabel("Employee ID", self._card))
         card_layout.addWidget(self._employee_id)
-        card_layout.addWidget(QLabel("Department", self._card))
+        card_layout.addWidget(QLabel("Directorate", self._card))
         card_layout.addWidget(self._department)
         card_layout.addWidget(QLabel("Lab", self._card))
         card_layout.addWidget(self._lab)
@@ -160,7 +160,7 @@ class SignupDialog(QDialog):
             QMessageBox.warning(self, "Missing", "Employee ID is required")
             return
         if not department:
-            QMessageBox.warning(self, "Missing", "Department is required")
+            QMessageBox.warning(self, "Missing", "Directorate is required")
             return
         if not lab:
             QMessageBox.warning(self, "Missing", "Lab is required")

@@ -30,7 +30,7 @@ class ForgotPasswordDialog(QDialog):
         super().__init__(parent)
         self._workflow = workflow
 
-        self.setWindowTitle("Forgot Password")
+        self.setWindowTitle("Signix - Password Recovery")
         self.setModal(True)
         self.setObjectName("LoginDialog")
         self.resize(420, 300)
@@ -109,7 +109,7 @@ class LoginDialog(QDialog):
         self._workflow = workflow
         self._selected_user: Optional[User] = None
 
-        self.setWindowTitle("Login")
+        self.setWindowTitle("Signix - Login")
         self.setModal(True)
         self.resize(520, 640)
 
@@ -138,13 +138,18 @@ class LoginDialog(QDialog):
         self._remember = QCheckBox("Remember me", self._card)
         self._remember.setObjectName("RememberMe")
 
+        self._show_pw = QCheckBox("Show", self._card)
+        self._show_pw.setObjectName("RememberMe")
+        self._show_pw.setFixedWidth(60)
+        self._show_pw.stateChanged.connect(self._toggle_password_visibility)
+
         forgot_btn = QPushButton("Forgot Password?", self._card)
         forgot_btn.setObjectName("ForgotLink")
         forgot_btn.setFlat(True)
-        forgot_btn.setAutoDefault(False)   # prevent Enter from triggering
+        forgot_btn.setAutoDefault(False)
         forgot_btn.setDefault(False)
         forgot_btn.clicked.connect(self._open_forgot_password)
-        self._forgot_btn = forgot_btn  # store reference for guard
+        self._forgot_btn = forgot_btn
 
         options_row = QHBoxLayout()
         options_row.setContentsMargins(0, 0, 0, 0)
@@ -170,6 +175,10 @@ class LoginDialog(QDialog):
         bottom_row.addWidget(register_btn)
         bottom_row.addStretch(1)
 
+        pw_row = QHBoxLayout()
+        pw_row.addWidget(self._password, 1)
+        pw_row.addWidget(self._show_pw)
+
         card_layout = QVBoxLayout()
         card_layout.setContentsMargins(34, 34, 34, 28)
         card_layout.setSpacing(16)
@@ -178,7 +187,7 @@ class LoginDialog(QDialog):
         card_layout.addWidget(QLabel("Employee name", self._card))
         card_layout.addWidget(self._username)
         card_layout.addWidget(QLabel("Password", self._card))
-        card_layout.addWidget(self._password)
+        card_layout.addLayout(pw_row)
         card_layout.addLayout(options_row)
         card_layout.addWidget(self._login_btn)
         card_layout.addSpacing(6)
@@ -222,7 +231,7 @@ class LoginDialog(QDialog):
         username = dlg.get_username()
         if username is None:
             return
-        normalized = username.lower().replace(" ")
+        normalized = username.lower().replace(" ", "")
 
         # Validate that the username exists
         u = self._workflow.get_user_by_username(normalized)
@@ -245,7 +254,7 @@ class LoginDialog(QDialog):
     @staticmethod
     def _styled_msg(parent, title: str, text: str, icon_type: str = "information") -> None:
         dlg = QDialog(parent)
-        dlg.setWindowTitle(title)
+        dlg.setWindowTitle(f"Signix - {title}")
         dlg.setModal(True)
         dlg.setObjectName("LoginDialog")
         dlg.resize(400, 220)
@@ -342,6 +351,12 @@ class LoginDialog(QDialog):
 
         self._selected_user = user
         self.accept()
+
+    def _toggle_password_visibility(self, state: int) -> None:
+        if state == Qt.Checked:
+            self._password.setEchoMode(QLineEdit.Normal)
+        else:
+            self._password.setEchoMode(QLineEdit.Password)
 
     def _open_signup(self) -> None:
         dlg = SignupDialog(self._workflow, self)

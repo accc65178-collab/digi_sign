@@ -2,6 +2,7 @@ import sys
 from pathlib import Path
 
 from PyQt5.QtWidgets import QApplication
+from PyQt5.QtGui import QIcon
 
 from database.db_manager import DbConfig, DbManager
 from services.comment_service import CommentService
@@ -13,6 +14,11 @@ from ui.login import LoginDialog
 
 def main() -> int:
     app = QApplication(sys.argv)
+    app.setApplicationName("Signix")
+    
+    icon_path = Path(__file__).resolve().parent / "ui" / "images" / "logo.ico"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     qss_path = Path(__file__).resolve().parent / "ui" / "styles.qss"
     if qss_path.exists():

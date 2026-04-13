@@ -60,6 +60,8 @@ class DbManager:
                 conn.execute("ALTER TABLE users ADD COLUMN department TEXT")
             if "lab" not in user_col_names:
                 conn.execute("ALTER TABLE users ADD COLUMN lab TEXT")
+            if "signature_png" not in user_col_names:
+                conn.execute("ALTER TABLE users ADD COLUMN signature_png BLOB")
 
             conn.execute("UPDATE users SET status = 'Approved' WHERE status IS NULL OR status = ''")
 
@@ -84,6 +86,7 @@ class DbManager:
                     title TEXT NOT NULL,
                     content TEXT NOT NULL,
                     created_by INTEGER NOT NULL,
+                    initiator_signature_png BLOB,
                     status TEXT NOT NULL,
                     assigned_to INTEGER,
                     current_step INTEGER NOT NULL DEFAULT 0,
@@ -101,6 +104,9 @@ class DbManager:
             # Migration: add subject if the database was created before this column existed.
             if "subject" not in col_names:
                 conn.execute("ALTER TABLE documents ADD COLUMN subject TEXT DEFAULT ''")
+            # Migration: add initiator_signature_png if the database was created before this column existed.
+            if "initiator_signature_png" not in col_names:
+                conn.execute("ALTER TABLE documents ADD COLUMN initiator_signature_png BLOB")
             # Migration: add created_at if the database was created before this column existed.
             if "created_at" not in col_names:
                 conn.execute("ALTER TABLE documents ADD COLUMN created_at TEXT DEFAULT ''")
@@ -125,6 +131,10 @@ class DbManager:
             chain_col_names = {row["name"] for row in chain_cols}
             if "signature_png" not in chain_col_names:
                 conn.execute("ALTER TABLE approval_chain ADD COLUMN signature_png BLOB")
+            
+            # Migration: add approval_date to approval_chain if missing.
+            if "approval_date" not in chain_col_names:
+                conn.execute("ALTER TABLE approval_chain ADD COLUMN approval_date TEXT")
 
             conn.execute(
                 """
@@ -175,6 +185,7 @@ class DbManager:
                         ph = bcrypt.hashpw(username.encode("utf-8"), bcrypt.gensalt()).decode("utf-8")
                         conn.execute("UPDATE users SET password_hash = ? WHERE id = ?", (ph, r["id"]))
 
+
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS password_reset_requests (
@@ -189,10 +200,28 @@ class DbManager:
                 """
             )
 
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS settings (
+                    key TEXT PRIMARY KEY,
+                    value TEXT NOT NULL
+                )
+                """
+            )
+
+            # Pre-populate default settings if they don't exist
+            defaults = [
+                ("ref_prefix", "SIGNIX/"),
+                ("org_name", "Organization Name"),
+                ("default_font", "Times New Roman"),
+            ]
+            for key, val in defaults:
+                conn.execute("INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)", (key, val))
+
     def list_users(self) -> List[User]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users ORDER BY id"
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled, signature_png FROM users ORDER BY id"
             ).fetchall()
         return [
             User(
@@ -208,6 +237,7 @@ class DbManager:
                 role=row["role"],
                 status=row["status"],
                 enabled=bool(row["enabled"]),
+                signature_png=row["signature_png"] if "signature_png" in row.keys() else None,
             )
             for row in rows
         ]
@@ -215,7 +245,7 @@ class DbManager:
     def get_user(self, user_id: int) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users WHERE id = ?",
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled, signature_png FROM users WHERE id = ?",
                 (user_id,),
             ).fetchone()
         if row is None:
@@ -233,12 +263,13 @@ class DbManager:
             role=row["role"],
             status=row["status"],
             enabled=bool(row["enabled"]),
+            signature_png=row["signature_png"] if "signature_png" in row.keys() else None,
         )
 
     def get_user_by_username(self, username: str) -> Optional[User]:
         with self._connect() as conn:
             row = conn.execute(
-                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users WHERE username = ?",
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled, signature_png FROM users WHERE username = ?",
                 (username,),
             ).fetchone()
         if row is None:
@@ -256,7 +287,25 @@ class DbManager:
             role=row["role"],
             status=row["status"],
             enabled=bool(row["enabled"]),
+            signature_png=row["signature_png"] if "signature_png" in row.keys() else None,
         )
+
+    def get_user_signature_png(self, *, user_id: int) -> Optional[bytes]:
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT signature_png FROM users WHERE id = ?",
+                (int(user_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return row["signature_png"] if "signature_png" in row.keys() else None
+
+    def set_user_signature_png(self, *, user_id: int, signature_png: Optional[bytes]) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "UPDATE users SET signature_png = ? WHERE id = ?",
+                (signature_png, int(user_id)),
+            )
 
     def create_user(
         self, *, name: str, full_name: str, employee_id: str, department: str, lab: str, username: str, password_hash: str, designation: str, role: str, status: str, enabled: int = 1
@@ -283,7 +332,7 @@ class DbManager:
     def list_users_by_status(self, status: str) -> List[User]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled FROM users WHERE status = ? ORDER BY id",
+                "SELECT id, name, full_name, employee_id, department, lab, username, password_hash, designation, role, status, enabled, signature_png FROM users WHERE status = ? ORDER BY id",
                 (status,),
             ).fetchall()
         return [
@@ -300,6 +349,7 @@ class DbManager:
                 role=row["role"],
                 status=row["status"],
                 enabled=bool(row["enabled"]),
+                signature_png=row["signature_png"] if "signature_png" in row.keys() else None,
             )
             for row in rows
         ]
@@ -333,7 +383,7 @@ class DbManager:
     def list_all_documents(self) -> List[Document]:
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT id, title, subject, content, created_by, status, assigned_to, current_step FROM documents ORDER BY id DESC"
+                "SELECT id, title, subject, content, created_by, initiator_signature_png, status, assigned_to, current_step, created_at FROM documents ORDER BY id DESC"
             ).fetchall()
         return [
             Document(
@@ -342,6 +392,7 @@ class DbManager:
                 subject=row["subject"] if "subject" in row.keys() else "",
                 content=row["content"],
                 created_by=row["created_by"],
+                initiator_signature_png=row["initiator_signature_png"] if "initiator_signature_png" in row.keys() else None,
                 status=row["status"],
                 assigned_to=row["assigned_to"],
                 current_step=row["current_step"],
@@ -381,6 +432,8 @@ class DbManager:
 
     def delete_document(self, doc_id: int) -> None:
         with self._connect() as conn:
+            conn.execute("DELETE FROM approval_chain WHERE document_id = ?", (doc_id,))
+            conn.execute("DELETE FROM comments WHERE document_id = ?", (doc_id,))
             conn.execute("DELETE FROM documents WHERE id = ?", (doc_id,))
 
     def create_document(self, doc: Document) -> int:
@@ -390,14 +443,15 @@ class DbManager:
         with self._connect() as conn:
             cur = conn.execute(
                 """
-                INSERT INTO documents(title, subject, content, created_by, status, assigned_to, current_step, created_at)
-                VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO documents(title, subject, content, created_by, initiator_signature_png, status, assigned_to, current_step, created_at)
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     doc.title,
                     doc.subject,
                     doc.content,
                     doc.created_by,
+                    doc.initiator_signature_png,
                     doc.status,
                     doc.assigned_to,
                     doc.current_step,
@@ -414,13 +468,14 @@ class DbManager:
             conn.execute(
                 """
                 UPDATE documents
-                SET title = ?, subject = ?, content = ?, status = ?, assigned_to = ?, current_step = ?
+                SET title = ?, subject = ?, content = ?, initiator_signature_png = ?, status = ?, assigned_to = ?, current_step = ?
                 WHERE id = ?
                 """,
                 (
                     doc.title,
                     doc.subject,
                     doc.content,
+                    doc.initiator_signature_png,
                     doc.status,
                     doc.assigned_to,
                     doc.current_step,
@@ -432,7 +487,7 @@ class DbManager:
         with self._connect() as conn:
             row = conn.execute(
                 """
-                SELECT id, title, subject, content, created_by, status, assigned_to, current_step, created_at
+                SELECT id, title, subject, content, created_by, initiator_signature_png, status, assigned_to, current_step, created_at
                 FROM documents
                 WHERE id = ?
                 """,
@@ -447,6 +502,7 @@ class DbManager:
             subject=row["subject"] if "subject" in row.keys() else "",
             content=row["content"],
             created_by=row["created_by"],
+            initiator_signature_png=row["initiator_signature_png"] if "initiator_signature_png" in row.keys() else None,
             status=row["status"],
             assigned_to=row["assigned_to"],
             current_step=row["current_step"],
@@ -457,7 +513,7 @@ class DbManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, title, subject, content, created_by, status, assigned_to, current_step, created_at
+                SELECT id, title, subject, content, created_by, initiator_signature_png, status, assigned_to, current_step, created_at
                 FROM documents
                 WHERE created_by = ?
                 ORDER BY id DESC
@@ -471,6 +527,7 @@ class DbManager:
                 subject=row["subject"] if "subject" in row.keys() else "",
                 content=row["content"],
                 created_by=row["created_by"],
+                initiator_signature_png=row["initiator_signature_png"] if "initiator_signature_png" in row.keys() else None,
                 status=row["status"],
                 assigned_to=row["assigned_to"],
                 current_step=row["current_step"],
@@ -505,7 +562,7 @@ class DbManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, title, subject, content, created_by, status, assigned_to, current_step, created_at
+                SELECT id, title, subject, content, created_by, initiator_signature_png, status, assigned_to, current_step, created_at
                 FROM documents
                 WHERE assigned_to = ?
                 ORDER BY
@@ -529,6 +586,34 @@ class DbManager:
                 status=row["status"],
                 assigned_to=row["assigned_to"],
                 current_step=row["current_step"],
+                created_at=row["created_at"] if "created_at" in row.keys() else "",
+            )
+            for row in rows
+        ]
+
+    def list_documents_approved_by_user(self, user_id: int) -> List[Document]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT d.id, d.title, d.subject, d.content, d.created_by, d.initiator_signature_png, d.status, d.assigned_to, d.current_step, d.created_at
+                FROM documents d
+                JOIN approval_chain ac ON d.id = ac.document_id
+                WHERE ac.user_id = ? AND ac.status = 'Approved' AND d.created_by != ?
+                ORDER BY d.id DESC
+                """,
+                (user_id, user_id),
+            ).fetchall()
+        return [
+            Document(
+                id=row["id"],
+                title=row["title"],
+                subject=row["subject"] if "subject" in row.keys() else "",
+                content=row["content"],
+                created_by=row["created_by"],
+                status=row["status"],
+                assigned_to=row["assigned_to"],
+                current_step=row["current_step"],
+                created_at=row["created_at"] if "created_at" in row.keys() else "",
             )
             for row in rows
         ]
@@ -548,7 +633,7 @@ class DbManager:
         with self._connect() as conn:
             rows = conn.execute(
                 """
-                SELECT id, document_id, user_id, step_order, status, signature_png
+                SELECT id, document_id, user_id, step_order, status, signature_png, approval_date
                 FROM approval_chain
                 WHERE document_id = ?
                 ORDER BY step_order ASC
@@ -563,6 +648,7 @@ class DbManager:
                 step_order=row["step_order"],
                 status=row["status"],
                 signature_png=row["signature_png"],
+                approval_date=row["approval_date"] if "approval_date" in row.keys() else "",
             )
             for row in rows
         ]
@@ -601,14 +687,25 @@ class DbManager:
 
     def update_approval_step_status(self, *, document_id: int, step_order: int, status: str) -> None:
         with self._connect() as conn:
-            conn.execute(
-                """
-                UPDATE approval_chain
-                SET status = ?
-                WHERE document_id = ? AND step_order = ?
-                """,
-                (status, document_id, step_order),
-            )
+            if status == "Approved":
+                # Set approval_date when approving
+                conn.execute(
+                    """
+                    UPDATE approval_chain
+                    SET status = ?, approval_date = ?
+                    WHERE document_id = ? AND step_order = ?
+                    """,
+                    (status, datetime.now().isoformat(timespec="seconds"), document_id, step_order),
+                )
+            else:
+                conn.execute(
+                    """
+                    UPDATE approval_chain
+                    SET status = ?
+                    WHERE document_id = ? AND step_order = ?
+                    """,
+                    (status, document_id, step_order),
+                )
 
     def add_comment(self, comment: Comment) -> int:
         with self._connect() as conn:
@@ -642,3 +739,20 @@ class DbManager:
             )
             for row in rows
         ]
+    def get_setting(self, key: str, default: str = "") -> str:
+        with self._connect() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            if row:
+                return str(row["value"])
+            return default
+
+    def update_setting(self, key: str, value: str) -> None:
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
+
+    def update_user_role(self, user_id: int, role: str) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE users SET role = ? WHERE id = ?", (role, user_id))

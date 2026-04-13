@@ -25,7 +25,7 @@ from models.user import User
 from services.comment_service import CommentService
 from services.workflow_service import WorkflowService
 from ui.admin_panel import AdminPanelDialog
-from ui.editor import EditorWindow
+from ui.editor import EditorWindow, _SignatureDialog
 from ui.components.card_widget import CardWidget
 from ui.components.sidebar import Sidebar, default_nav_items
 from ui.components.table_widget import TableWidget
@@ -49,7 +49,7 @@ class DashboardWindow(QMainWindow):
         self._current_user = current_user
         self._logout_requested = False
 
-        self.setWindowTitle(f"Dashboard - {current_user.display_label()}")
+        self.setWindowTitle(f"Signix - Dashboard ({current_user.display_label()})")
         self.resize(1100, 700)
         self.setWindowState(Qt.WindowMaximized)
 
@@ -66,17 +66,21 @@ class DashboardWindow(QMainWindow):
         self._topbar.search_changed.connect(self._on_search_changed)
         self._topbar.set_admin_visible(current_user.role == "Admin")
 
+        self._create_menus()
+
         self._stack = QStackedWidget(self)
 
         self._dashboard_page = self._build_dashboard_page()
         self._my_docs_page = self._build_table_page("My Documents")
+        self._my_approved_page = self._build_table_page("My Approved Letters")
         self._pending_page = self._build_table_page("Pending Approvals")
-        self._completed_page = self._build_table_page("Completed Documents")
+        self._approved_by_me_page = self._build_table_page("Approved by Me")
 
         self._stack.addWidget(self._dashboard_page)
         self._stack.addWidget(self._my_docs_page)
+        self._stack.addWidget(self._my_approved_page)
         self._stack.addWidget(self._pending_page)
-        self._stack.addWidget(self._completed_page)
+        self._stack.addWidget(self._approved_by_me_page)
 
         right = QWidget(self)
         right_layout = QVBoxLayout()
@@ -94,15 +98,34 @@ class DashboardWindow(QMainWindow):
         root.setLayout(shell)
 
         self._my_docs_table.itemDoubleClicked.connect(lambda _: self._open_selected(self._my_docs_table))
+        self._my_approved_table.itemDoubleClicked.connect(lambda _: self._open_selected(self._my_approved_table))
         self._pending_table.itemDoubleClicked.connect(lambda _: self._open_selected(self._pending_table))
-        self._completed_table.itemDoubleClicked.connect(lambda _: self._open_selected(self._completed_table))
+        self._approved_by_me_table.itemDoubleClicked.connect(lambda _: self._open_selected(self._approved_by_me_table))
         self._recent_table.itemDoubleClicked.connect(lambda _: self._open_selected(self._recent_table))
 
         self._sidebar.set_active("dashboard")
         self.refresh()
 
+    def _create_menus(self) -> None:
+        mb = self.menuBar()
+        profile_menu = mb.addMenu("Profile")
+        act_change_sig = profile_menu.addAction("Change Signature")
+        act_change_sig.triggered.connect(self._change_signature)
+
+    def _change_signature(self) -> None:
+        dlg = _SignatureDialog(self)
+        if dlg.exec_() != dlg.Accepted:
+            return
+        sig_png = dlg.signature_png_bytes()
+        if not sig_png:
+            return
+        try:
+            self._workflow.set_user_signature_png(user_id=self._current_user.id, signature_png=sig_png)
+        except Exception as exc:
+            QMessageBox.critical(self, "Failed", str(exc))
+
     def _make_table(self) -> QTableWidget:
-        return TableWidget(["Title", "Status", "Current Step", "Assigned To"], self)
+        return TableWidget(["Title", "Subject", "Status", "Initiator", "Created", "Approval Chain", "Approved"], self)
 
     def _build_table_page(self, title: str) -> QWidget:
         page = QWidget(self)
@@ -139,12 +162,15 @@ class DashboardWindow(QMainWindow):
         if title == "My Documents":
             self._my_docs_table = table
             self._my_docs_empty = empty
+        elif title == "My Approved Letters":
+            self._my_approved_table = table
+            self._my_approved_empty = empty
         elif title == "Pending Approvals":
             self._pending_table = table
             self._pending_empty = empty
-        else:
-            self._completed_table = table
-            self._completed_empty = empty
+        elif title == "Approved by Me":
+            self._approved_by_me_table = table
+            self._approved_by_me_empty = empty
 
         return page
 
@@ -203,32 +229,44 @@ class DashboardWindow(QMainWindow):
     def refresh(self) -> None:
         created = self._workflow.my_created_documents(self._current_user.id)
         pending = self._workflow.pending_for_me(self._current_user.id)
+        approved_by_me = self._workflow.documents_approved_by_me(self._current_user.id)
 
-        completed = [d for d in created if d.status in ("Approved", "Rejected")]
+        # 1. My Documents (Drafts/Pending creation)
         my_docs = [d for d in created if d.status not in ("Approved", "Rejected")]
+        
+        # 2. My Approved Letters (Created by me, now approved)
+        my_approved = [d for d in created if d.status == "Approved"]
+        
+        # 3. Pending Approvals (Assigned to me)
+        # (already in 'pending' variable)
+        
+        # 4. Approved by Me (Created by others, approved by me)
+        # (already in 'approved_by_me' variable)
 
         pending_count = sum(1 for d in pending if d.status == "Pending")
         self._sidebar.set_badge("pending", pending_count)
 
-        all_docs = created + pending
+        all_docs = created + pending + approved_by_me
         total = len({d.id for d in all_docs if d.id is not None})
-        approved = sum(1 for d in all_docs if d.status == "Approved")
+        approved_total = sum(1 for d in all_docs if d.status == "Approved")
 
         self._total_card.set_value(str(total))
         self._pending_card.set_value(str(pending_count))
-        self._approved_card.set_value(str(approved))
+        self._approved_card.set_value(str(approved_total))
 
         self._fill_table(self._my_docs_table, my_docs)
+        self._fill_table(self._my_approved_table, my_approved)
         self._fill_table(self._pending_table, pending, highlight_pending=True)
-        self._fill_table(self._completed_table, completed)
+        self._fill_table(self._approved_by_me_table, approved_by_me)
 
-        recent = (pending + created)[:]
+        recent = (pending + created + approved_by_me)[:]
         recent.sort(key=lambda d: (d.id or 0), reverse=True)
         self._fill_table(self._recent_table, recent[:10], highlight_pending=True)
 
         self._set_empty_state(self._my_docs_table, self._my_docs_empty, "No documents found")
+        self._set_empty_state(self._my_approved_table, self._my_approved_empty, "No approved letters")
         self._set_empty_state(self._pending_table, self._pending_empty, "No pending approvals")
-        self._set_empty_state(self._completed_table, self._completed_empty, "No completed documents")
+        self._set_empty_state(self._approved_by_me_table, self._approved_by_me_empty, "No letters approved by you")
         self._set_empty_state(self._recent_table, self._recent_empty, "No recent activity")
 
     def _assignee_label(self, assigned_to: Optional[int]) -> str:
@@ -241,6 +279,8 @@ class DashboardWindow(QMainWindow):
         return user.display_label()
 
     def _fill_table(self, table: QTableWidget, docs: list[Document], *, highlight_pending: bool = False) -> None:
+        was_sorting = table.isSortingEnabled()
+        table.setSortingEnabled(False)
         table.setRowCount(0)
         for doc in docs:
             row = table.rowCount()
@@ -248,20 +288,85 @@ class DashboardWindow(QMainWindow):
 
             title_item = QTableWidgetItem(doc.title)
             title_item.setData(Qt.UserRole, _RowRef(doc_id=int(doc.id)))
-            status_item = QTableWidgetItem(doc.status)
-            step_item = QTableWidgetItem(str(doc.current_step + 1) if doc.status == "Pending" else "-")
-            assigned_to_item = QTableWidgetItem(self._assignee_label(doc.assigned_to))
+            
+            # Get initiator info
+            initiator_name = "Unknown"
+            initiator = self._workflow.get_user(doc.created_by)
+            if initiator:
+                initiator_name = initiator.display_label()
 
+            # Format creation date
+            created_date = ""
+            if doc.created_at:
+                try:
+                    from datetime import datetime
+                    dt = datetime.fromisoformat(doc.created_at)
+                    created_date = dt.strftime("%d-%m-%Y")
+                except Exception:
+                    created_date = doc.created_at[:10] if len(doc.created_at) > 10 else doc.created_at
+
+            # Get approval chain info
+            approval_chain = ""
+            approved_date = ""
+            if doc.id:
+                try:
+                    chain = self._workflow.get_approval_chain(doc.id)
+                    if chain:
+                        chain_names = []
+                        for step in chain:
+                            approver = self._workflow.get_user(step.user_id)
+                            if approver:
+                                name = approver.display_label()
+                                if step.status == "Approved":
+                                    chain_names.append(f"{name} ✓")
+                                    # Get the last approval date
+                                    if step.approval_date and not approved_date:
+                                        try:
+                                            from datetime import datetime
+                                            dt = datetime.fromisoformat(step.approval_date)
+                                            approved_date = dt.strftime("%d-%m-%Y")
+                                        except Exception:
+                                            approved_date = step.approval_date[:10] if len(step.approval_date) > 10 else step.approval_date
+                                elif step.status == "Pending":
+                                    chain_names.append(f"{name} (Pending)")
+                                else:
+                                    chain_names.append(name)
+                        approval_chain = " → ".join(chain_names)
+                except Exception:
+                    approval_chain = "Not configured"
+
+            # Create table items
+            subject_item = QTableWidgetItem(doc.subject[:50] + "..." if len(doc.subject) > 50 else doc.subject)
+            status_item = QTableWidgetItem(doc.status)
+            initiator_item = QTableWidgetItem(initiator_name)
+            created_item = QTableWidgetItem(created_date)
+            chain_item = QTableWidgetItem(approval_chain)
+            approved_item = QTableWidgetItem(approved_date if approved_date else "-")
+
+            # Highlight pending items
             if highlight_pending and doc.status == "Pending":
-                for item in (title_item, status_item, step_item, assigned_to_item):
+                for item in (title_item, subject_item, status_item, initiator_item, created_item, chain_item, approved_item):
                     item.setBackground(QColor(255, 248, 204))
 
+            # Set items in table
             table.setItem(row, 0, title_item)
-            table.setItem(row, 1, status_item)
-            table.setItem(row, 2, step_item)
-            table.setItem(row, 3, assigned_to_item)
+            table.setItem(row, 1, subject_item)
+            table.setItem(row, 2, status_item)
+            table.setItem(row, 3, initiator_item)
+            table.setItem(row, 4, created_item)
+            table.setItem(row, 5, chain_item)
+            table.setItem(row, 6, approved_item)
 
-        table.resizeColumnsToContents()
+        # Resize columns for better fit
+        table.setColumnWidth(0, 200)  # Title
+        table.setColumnWidth(1, 200)  # Subject
+        table.setColumnWidth(2, 100)  # Status
+        table.setColumnWidth(3, 120)  # Initiator
+        table.setColumnWidth(4, 100)  # Created
+        table.setColumnWidth(5, 250)  # Approval Chain
+        table.setColumnWidth(6, 100)  # Approved
+
+        table.setSortingEnabled(was_sorting)
 
     def _selected_doc_id(self, table: QTableWidget) -> Optional[int]:
         row = table.currentRow()
@@ -279,8 +384,9 @@ class DashboardWindow(QMainWindow):
         mapping = {
             "dashboard": 0,
             "my_docs": 1,
-            "pending": 2,
-            "completed": 3,
+            "my_approved": 2,
+            "pending": 3,
+            "approved_by_me": 4,
         }
         index = mapping.get(key)
         if index is not None:
@@ -303,9 +409,11 @@ class DashboardWindow(QMainWindow):
         if idx == 1:
             return self._my_docs_table
         if idx == 2:
-            return self._pending_table
+            return self._my_approved_table
         if idx == 3:
-            return self._completed_table
+            return self._pending_table
+        if idx == 4:
+            return self._approved_by_me_table
         return None
 
     def _logout(self) -> None:
@@ -338,11 +446,11 @@ class DashboardWindow(QMainWindow):
             self.refresh()
             return
 
-        editor = EditorWindow(self._workflow, self._comments, self._current_user, doc)
+        editor = EditorWindow(self._workflow, self._comments, self._current_user, doc, self)
         editor.saved.connect(self.refresh)
         editor.show()
 
     def _new_document(self) -> None:
-        editor = EditorWindow(self._workflow, self._comments, self._current_user, None)
+        editor = EditorWindow(self._workflow, self._comments, self._current_user, None, self)
         editor.saved.connect(self.refresh)
         editor.show()

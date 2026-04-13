@@ -10,3 +10,4 @@ class ApprovalChainStep:
     step_order: int
     status: str
     signature_png: Optional[bytes] = None
+    approval_date: str = ""

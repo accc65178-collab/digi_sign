@@ -86,6 +86,7 @@ def default_nav_items() -> list[NavItem]:
     return [
         NavItem("dashboard", "Dashboard", QStyle.SP_ComputerIcon),
         NavItem("my_docs", "My Documents", QStyle.SP_FileIcon),
+        NavItem("my_approved", "My Approved Letters", QStyle.SP_DialogYesButton),
         NavItem("pending", "Pending Approvals", QStyle.SP_MessageBoxInformation),
-        NavItem("completed", "Completed", QStyle.SP_DialogApplyButton),
+        NavItem("approved_by_me", "Approved by Me", QStyle.SP_DialogApplyButton),
     ]

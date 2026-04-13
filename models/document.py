@@ -20,6 +20,7 @@ class Document:
     status: str
     assigned_to: Optional[int]
     current_step: int
+    initiator_signature_png: Optional[bytes] = None
     created_at: str = ""
 
 

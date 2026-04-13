@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,7 @@ class User:
     role: str
     status: str
     enabled: bool
+    signature_png: Optional[bytes] = None
 
     def display_label(self) -> str:
         d = (self.designation or "").strip()
