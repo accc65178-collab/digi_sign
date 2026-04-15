@@ -211,7 +211,7 @@ class DbManager:
 
             # Pre-populate default settings if they don't exist
             defaults = [
-                ("ref_prefix", "SIGNIX/"),
+                ("ref_prefix", "NECOP/"),
                 ("org_name", "Organization Name"),
                 ("default_font", "Times New Roman"),
             ]

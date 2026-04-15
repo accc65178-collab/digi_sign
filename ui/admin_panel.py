@@ -529,7 +529,7 @@ class AdminPanelDialog(QDialog):
 
     def _refresh_settings(self) -> None:
         self._set_org_name.setText(self._workflow.get_setting("org_name", "Organization Name"))
-        self._set_ref_prefix.setText(self._workflow.get_setting("ref_prefix", "SIGNIX/"))
+        self._set_ref_prefix.setText(self._workflow.get_setting("ref_prefix", "NECOP/"))
         self._set_default_font.setText(self._workflow.get_setting("default_font", "Times New Roman"))
 
     def _save_general_settings(self) -> None:

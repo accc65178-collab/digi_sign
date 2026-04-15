@@ -4,6 +4,8 @@ import os
 import html
 import base64
 import io
+import shutil
+import traceback
 from html.parser import HTMLParser
 from pathlib import Path
 from datetime import datetime
@@ -33,6 +35,7 @@ QTextTableFormat = QtGui.QTextTableFormat
 QTextLength = QtGui.QTextLength
 QTextCursor = QtGui.QTextCursor
 QTextListFormat = QtGui.QTextListFormat
+QTextBlockFormat = QtGui.QTextBlockFormat
 QAction = QtWidgets.QAction
 QMenu = QtWidgets.QMenu
 QComboBox = QtWidgets.QComboBox
@@ -89,11 +92,8 @@ def _build_ref_and_date(*, workflow: WorkflowService, doc: Document, user: User)
     
     seq = workflow.daily_sequence_for_document(document_id=getattr(doc, "id", None), iso_date=iso_date)
     
-    # Use target_user (original creator) for dept/lab info
     dept = (getattr(target_user, "department", "") or "").strip() or "DEPT"
     lab = (getattr(target_user, "lab", "") or "").strip() or "LAB"
-    dept = dept.replace("/", "-")
-    lab = lab.replace("/", "-")
     ref_prefix = workflow.get_setting("ref_prefix", "NECOP/")
     if not ref_prefix.endswith("/"):
         ref_prefix += "/"
@@ -147,6 +147,26 @@ class _HtmlBodyParser(HTMLParser):
             self._flush_p()
             self._in_table = True
             self._cur_table = []
+            # Extract border from border attribute or style
+            border_attr = next((v for k, v in attrs if (k or "").lower() == "border"), "")
+            self._cur_table_border = 1  # Default border
+            if border_attr:
+                try:
+                    self._cur_table_border = int(float(border_attr))
+                except:
+                    self._cur_table_border = 1
+            else:
+                # Try to get from style attribute
+                style_attr = next((v for k, v in attrs if (k or "").lower() == "style"), "") or ""
+                if style_attr:
+                    try:
+                        import re
+                        # Look for border-width in style
+                        m = re.search(r'border-width:\s*([0-9.]+)px', style_attr)
+                        if m:
+                            self._cur_table_border = int(float(m.group(1)))
+                    except Exception:
+                        pass
             return
         
         if t in ("ul", "ol"):
@@ -271,7 +291,7 @@ class _HtmlBodyParser(HTMLParser):
 
         if t == "table":
             if self._cur_table:
-                self.items.append({"type": "table", "rows": self._cur_table})
+                self.items.append({"type": "table", "rows": self._cur_table, "border": getattr(self, '_cur_table_border', 1)})
             self._in_table = False
             self._in_tr = False
             self._in_td = False
@@ -362,7 +382,7 @@ def _html_to_docx_items(body_html: str) -> List[dict]:
     return p.items
 
 
-def _set_table_borders(table) -> None:
+def _set_table_borders(table, border_width: int = 1) -> None:
     from docx.oxml.ns import qn
     from docx.oxml import parse_xml
     # Set borders for all cells in the table
@@ -370,17 +390,26 @@ def _set_table_borders(table) -> None:
     for cell in tbl.iter_tceleds() if hasattr(tbl, 'iter_tceleds') else []:
         pass # Not used, we'll do it via tblPr
     
+    # Convert border width to Word's units
+    # Word uses eighth-points for border width (1 point = 8 eighth-points)
+    # For better visibility: 1px=8, 2px=16, 3px=24, 4px=32
+    border_size = border_width * 8
+    
+    # Ensure minimum border size for visibility
+    if border_size < 8:
+        border_size = 8
+    
     # Simple way: add <w:tblBorders> to <w:tblPr>
     tblPr = tbl.xpath('w:tblPr')[0]
     borders = parse_xml(
-        r'<w:tblBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
-        r'<w:top w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-        r'<w:left w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-        r'<w:bottom w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-        r'<w:right w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-        r'<w:insideH w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-        r'<w:insideV w:val="single" w:sz="4" w:space="0" w:color="000000"/>'
-        r'</w:tblBorders>'
+        f'<w:tblBorders xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">'
+        f'<w:top w:val="single" w:sz="{border_size}" w:space="0" w:color="000000"/>'
+        f'<w:left w:val="single" w:sz="{border_size}" w:space="0" w:color="000000"/>'
+        f'<w:bottom w:val="single" w:sz="{border_size}" w:space="0" w:color="000000"/>'
+        f'<w:right w:val="single" w:sz="{border_size}" w:space="0" w:color="000000"/>'
+        f'<w:insideH w:val="single" w:sz="{border_size}" w:space="0" w:color="000000"/>'
+        f'<w:insideV w:val="single" w:sz="{border_size}" w:space="0" w:color="000000"/>'
+        f'</w:tblBorders>'
     )
     tblPr.append(borders)
 
@@ -401,7 +430,7 @@ def _to_roman(num: int) -> str:
 
 
 def _generate_signature_log(workflow: WorkflowService, doc: Document, current_user: User) -> str:
-    """Generate encoded signature log for QR code"""
+    """Generate encoded signature log for barcode"""
     from datetime import datetime
     
     # Helper function to encode employee info
@@ -485,33 +514,113 @@ def _generate_signature_log(workflow: WorkflowService, doc: Document, current_us
                     encoded_parts.append(encode_employee_info(approver_emp_id, approval_date))
         except Exception:
             pass
-    
     # Join all encoded parts with a separator
     return "|".join(encoded_parts)
 
 
-def _generate_qr_code(text: str) -> bytes:
-    """Generate QR code image bytes from text"""
-    import qrcode
+def _generate_tracking_payload(*, document_id: Optional[int], approval_log: str, workflow: WorkflowService, doc: Document, current_user: User) -> str:
+    """Generate tracking payload: employee_id + ref_no + approver_employee_ids"""
+    
+    # Get document creator (initiator)
+    creator_user = workflow.get_user(doc.created_by) if doc.id and doc.created_by else current_user
+    initiator_emp_id = getattr(creator_user, "employee_id", "") or ""
+    
+    # Get reference number without dash and extra parts
+    ref_value, _ = _build_ref_and_date(workflow=workflow, doc=doc, user=current_user)
+    # Extract the numeric part after last slash (e.g., "1426-1401" -> "14261401")
+    ref_parts = ref_value.split("/")
+    if len(ref_parts) >= 3:
+        ref_number = ref_parts[-1].replace("-", "")  # Remove dash
+    else:
+        ref_number = ref_value.replace("-", "").replace("/", "")
+    
+    # Get approver employee IDs
+    approver_ids = []
+    try:
+        if doc.id:
+            approval_chain = workflow.get_approval_chain(doc.id)
+            for step in approval_chain:
+                approver = workflow.get_user(step.user_id)
+                if approver and hasattr(approver, "employee_id"):
+                    approver_id = getattr(approver, "employee_id", "")
+                    if approver_id:
+                        approver_ids.append(approver_id)
+    except Exception:
+        pass
+    
+    # Combine all parts: employee_id + ref_no + approver_ids
+    payload = f"{initiator_emp_id}{ref_number}{''.join(approver_ids)}"
+    
+    # Limit to reasonable length for barcode (max 30 characters)
+    return payload[:30]
+
+
+def _generate_code128_barcode(text: str) -> bytes:
+    """Generate Code128 (subset B) barcode image bytes from text."""
     from io import BytesIO
-    
-    qr = qrcode.QRCode(
-        version=1,
-        error_correction=qrcode.constants.ERROR_CORRECT_L,
-        box_size=2,
-        border=1,
-    )
-    qr.add_data(text)
-    qr.make(fit=True)
-    
-    img = qr.make_image(fill_color="black", back_color="white")
-    
-    # Resize to smaller size for document footer
-    img = img.resize((80, 80))
-    
-    bio = BytesIO()
-    img.save(bio, format='PNG')
-    return bio.getvalue()
+
+    # Pillow is already present because qrcode uses it.
+    from PIL import Image, ImageDraw  # type: ignore
+
+    # Code 128 patterns for values 0..106 (stop=106)
+    patterns = [
+        "212222", "222122", "222221", "121223", "121322", "131222", "122213", "122312", "132212", "221213",
+        "221312", "231212", "112232", "122132", "122231", "113222", "123122", "123221", "223211", "221132",
+        "221231", "213212", "223112", "312131", "311222", "321122", "321221", "312212", "322112", "322211",
+        "212123", "212321", "232121", "111323", "131123", "131321", "112313", "132113", "132311", "211313",
+        "231113", "231311", "112133", "112331", "132131", "113123", "113321", "133121", "313121", "211331",
+        "231131", "213113", "213311", "213131", "311123", "311321", "331121", "312113", "312311", "332111",
+        "314111", "221411", "431111", "111224", "111422", "121124", "121421", "141122", "141221", "112214",
+        "112412", "122114", "122411", "142112", "142211", "241211", "221114", "413111", "241112", "134111",
+        "111242", "121142", "121241", "114212", "124112", "124211", "411212", "421112", "421211", "212141",
+        "214121", "412121", "111143", "111341", "131141", "114113", "114311", "411113", "411311", "113141",
+        "114131", "311141", "411131", "211412", "211214", "211232", "2331112",
+    ]
+
+    # Encode using Code Set B
+    start_code = 104
+    values = [start_code]
+    for ch in text:
+        o = ord(ch)
+        if o < 32 or o > 127:
+            # Replace unsupported characters
+            o = ord("?")
+        values.append(o - 32)
+
+    checksum = start_code
+    for i, v in enumerate(values[1:], start=1):
+        checksum += v * i
+    checksum %= 103
+    values.append(checksum)
+    values.append(106)  # stop
+
+    # Build module sequence
+    modules: list[int] = []
+    for v in values:
+        p = patterns[v]
+        modules.extend(int(d) for d in p)
+
+    module_px = 2
+    quiet_modules = 10
+    height_px = 50
+
+    total_modules = quiet_modules * 2 + sum(modules)
+    width_px = total_modules * module_px
+    img = Image.new("RGB", (width_px, height_px), "white")
+    draw = ImageDraw.Draw(img)
+
+    x = quiet_modules * module_px
+    black = True
+    for w in modules:
+        wpx = w * module_px
+        if black:
+            draw.rectangle([x, 0, x + wpx - 1, height_px], fill="black")
+        x += wpx
+        black = not black
+
+    buf = BytesIO()
+    img.save(buf, format="PNG")
+    return buf.getvalue()
 
 
 def _generate_docx_payload(
@@ -694,10 +803,13 @@ def _generate_docx_payload(
             num_rows = len(rows_data)
             num_cols = max(len(r) for r in rows_data)
             table = doc.add_table(rows=num_rows, cols=num_cols)
+            border_width = it.get("border", 1)  # Get border width from table data
             try:
                 table.style = 'Table Grid'
+                # Apply custom border thickness
+                _set_table_borders(table, border_width)
             except Exception:
-                _set_table_borders(table)
+                _set_table_borders(table, border_width)
             
             for r_idx, row_data in enumerate(rows_data):
                 for c_idx, cell_data_list in enumerate(row_data):
@@ -774,10 +886,17 @@ def _generate_docx_payload(
                         except Exception: pass
     except Exception: pass
 
-    # 6. Add QR Code to the footer
+    # 6. Add Barcode to the footer
     try:
         signature_log_text = _generate_signature_log(workflow, doc_model, current_user)
-        qr_bytes = _generate_qr_code(signature_log_text)
+        tracking_payload = _generate_tracking_payload(
+            document_id=doc_model.id, 
+            approval_log=signature_log_text,
+            workflow=workflow,
+            doc=doc_model,
+            current_user=current_user
+        )
+        barcode_bytes = _generate_code128_barcode(tracking_payload)
         
         # Get the first section
         section = doc.sections[0]
@@ -787,19 +906,25 @@ def _generate_docx_payload(
         for paragraph in footer.paragraphs:
             paragraph.clear()
         
-        # Add QR code to footer
+        # Add barcode to footer
         footer_para = footer.paragraphs[0] if footer.paragraphs else footer.add_paragraph()
         footer_para.alignment = WD_TAB_ALIGNMENT.CENTER
         
-        # Add QR code image to footer
-        qr_run = footer_para.add_run()
-        qr_run.add_picture(io.BytesIO(qr_bytes), width=Inches(0.8))
+        # Add barcode image to footer
+        bc_run = footer_para.add_run()
+        bc_run.add_picture(io.BytesIO(barcode_bytes), width=Inches(2.2))
+
+        # Add full approval encoded code beneath barcode
+        txt_para = footer.add_paragraph()
+        txt_para.alignment = WD_TAB_ALIGNMENT.CENTER
+        txt_run = txt_para.add_run(signature_log_text)
+        txt_run.font.size = Pt(6)
         
         # Set footer font properties
         footer_para.runs[0].font.size = Pt(8)
         
     except Exception:
-        # Silently fail if QR code generation fails
+        # Silently fail if barcode generation fails
         pass
 
     doc.save(str(output_path))
@@ -1262,45 +1387,84 @@ class _LetterPreviewDialog(QDialog):
         self.setLayout(layout)
 
     def _save_pdf(self) -> None:
-        out_dir = Path.home() / "Documents"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        # Let user choose export location
         safe_title = (self._doc.title or "Untitled").strip().replace("\\", "_").replace("/", "_")
-        docx_path = out_dir / f"{safe_title}.docx"
+        default_name = f"{safe_title}"
         
-        # Use the admin-uploaded template in letterhead folder if it exists
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        template_path = os.path.join(base_dir, "letterhead", "REF.docx")
-        if not os.path.exists(template_path):
-            # Fallback to default
-            template_path = os.path.join(base_dir, "documents", "REF.docx")
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export Document", 
+            str(Path.home() / "Documents" / default_name),
+            "Document Files (*.docx *.pdf)"
+        )
         
+        if not file_path:
+            return  # User cancelled
+            
         try:
-            # 1. Generate DOCX
-            _generate_docx_payload(
+            file_path = Path(file_path)
+            
+            # Ensure we have a base name without extension
+            if file_path.suffix:
+                file_path = file_path.with_suffix('')
+            
+            # Generate DOCX content using the template method
+            docx_path = file_path.with_suffix('.docx')
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            template_path = os.path.join(base_dir, "letterhead", "REF.docx")
+            if not os.path.exists(template_path):
+                template_path = os.path.join(base_dir, "documents", "REF.docx")
+
+            # Create DOCX file
+            result_path = _generate_docx_payload(
                 template_path=Path(template_path),
-                output_path=docx_path,
                 workflow=self._workflow,
                 doc_model=self._doc,
                 current_user=self._current_user,
-                editor_html=self._doc.content
+                editor_html=self._doc.content or "",  # Use document content instead of editor
+                output_path=docx_path,
             )
             
-            # Ask if user wants PDF too
-            res = QMessageBox.question(
-                self, "Export", 
-                f"DOCX saved to {docx_path}\n\nWould you like to export a PDF version as well?",
-                QMessageBox.Yes | QMessageBox.No
-            )
+            # Verify DOCX was created
+            if not docx_path.exists():
+                raise Exception(f"DOCX file was not created at {docx_path}")
             
-            if res == QMessageBox.Yes:
-                pdf_path = _convert_docx_to_pdf_win32(str(docx_path))
-                QMessageBox.information(self, "Success", f"PDF exported to:\n{pdf_path}")
-            else:
-                QMessageBox.information(self, "Success", f"DOCX exported to:\n{docx_path}")
-                
+            # Convert to PDF
+            pdf_path = _convert_docx_to_pdf_win32(str(docx_path))
+            
+            # Verify PDF was created
+            if not Path(pdf_path).exists():
+                raise Exception(f"PDF file was not created at {pdf_path}")
+            
+            QMessageBox.information(self, "Success", f"Documents exported:\nDOCX: {docx_path}\nPDF: {pdf_path}")
+                    
         except Exception as e:
             traceback.print_exc()
             QMessageBox.critical(self, "Export failed", f"Failed to export: {e}")
+
+    def _export_to_docx_content(self) -> bytes:
+        """Generate DOCX content as bytes for the current document"""
+        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        template_path = os.path.join(base_dir, "letterhead", "REF.docx")
+        if not os.path.exists(template_path):
+            template_path = os.path.join(base_dir, "documents", "REF.docx")
+        
+        # Create temporary file for generation
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix='.docx', delete=False) as tmp:
+            tmp_path = Path(tmp.name)
+        
+        try:
+            _generate_docx_payload(
+                template_path=Path(template_path),
+                workflow=self._workflow,
+                doc_model=self._doc,
+                current_user=self._current_user,
+                editor_html=self._editor.toHtml(),
+                output_path=tmp_path,
+            )
+            return tmp_path.read_bytes()
+        finally:
+            tmp_path.unlink(missing_ok=True)
 
 
 class EditorWindow(QMainWindow):
@@ -1381,7 +1545,7 @@ class EditorWindow(QMainWindow):
         self._send_btn = QPushButton("Send for Approval")
         self._approve_btn = QPushButton("Approve")
         self._reject_btn = QPushButton("Reject")
-        self._export_pdf_btn = QPushButton("Export PDF")
+        self._export_pdf_btn = QPushButton("Export")
 
         self._save_btn.clicked.connect(self.save)
         self._view_btn.clicked.connect(self._view_letter)
@@ -1615,23 +1779,33 @@ class EditorWindow(QMainWindow):
         self._header_label.setPixmap(scaled)
 
     def _export_to_docx_template(self) -> str:
-        out_dir = Path.home() / "Documents"
-        out_dir.mkdir(parents=True, exist_ok=True)
+        """Create DOCX file silently for PDF conversion"""
+        import tempfile
+        import os
+        
+        # Create temporary DOCX file
+        temp_dir = tempfile.gettempdir()
         safe_title = (self._doc.title or "Untitled").strip().replace("\\", "_").replace("/", "_")
-        out_path = out_dir / f"{safe_title}.docx"
-        base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        template_path = os.path.join(base_dir, "letterhead", "REF.docx")
-        if not os.path.exists(template_path):
-            template_path = os.path.join(base_dir, "documents", "REF.docx")
+        docx_path = os.path.join(temp_dir, f"{safe_title}_temp.docx")
+        
+        try:
+            base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            template_path = os.path.join(base_dir, "letterhead", "REF.docx")
+            if not os.path.exists(template_path):
+                template_path = os.path.join(base_dir, "documents", "REF.docx")
 
-        return _generate_docx_payload(
-            template_path=Path(template_path),
-            output_path=out_path,
-            workflow=self._workflow,
-            doc_model=self._doc,
-            current_user=self._current_user,
-            editor_html=self._editor.toHtml()
-        )
+            _generate_docx_payload(
+                template_path=Path(template_path),
+                workflow=self._workflow,
+                doc_model=self._doc,
+                current_user=self._current_user,
+                editor_html=self._editor.toHtml(),
+                output_path=Path(docx_path),
+            )
+            
+            return docx_path
+        except Exception as e:
+            raise Exception(f"Failed to create temporary DOCX: {e}")
 
     def _convert_docx_to_pdf(self, docx_path: str) -> str:
         return _convert_docx_to_pdf_win32(docx_path)
@@ -1642,17 +1816,90 @@ class EditorWindow(QMainWindow):
             QMessageBox.warning(self, "Save required", "Please save the document before exporting to PDF.")
             return
 
+        # Let user choose export location
+        safe_title = (self._doc.title or "Untitled").strip().replace("\\", "_").replace("/", "_")
+        default_name = f"{safe_title}"
+        
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Export PDF", 
+            str(Path.home() / "Documents" / default_name),
+            "PDF Files (*.pdf)"
+        )
+        
+        if not file_path:
+            return  # User cancelled
+
         try:
-            # 1. Generate DOCX from template
+            file_path = Path(file_path)
+            
+            # Ensure we have a PDF extension
+            if file_path.suffix != '.pdf':
+                file_path = file_path.with_suffix('.pdf')
+            
+            # 1. Generate DOCX from template (temporary file for conversion)
             docx_path = self._export_to_docx_template()
+            if not docx_path:  # Failed to create temp file
+                return
             
             # 2. Convert to PDF via Word
-            pdf_path = self._convert_docx_to_pdf(docx_path)
+            pdf_path = _convert_docx_to_pdf_win32(docx_path)
             
-            QMessageBox.information(self, "Success", f"Document exported as:\nDOCX: {docx_path}\nPDF: {pdf_path}")
+            # 3. Move PDF to user-selected location
+            if Path(pdf_path) != file_path:
+                shutil.move(pdf_path, str(file_path))
+                pdf_path = str(file_path)
+            
+            # 4. Ask if user also wants to save the Word document
+            reply = QMessageBox.question(
+                self, "Save Word Document",
+                "PDF exported successfully!\n\nWould you like to also save the Word document?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            
+            if reply == QMessageBox.Yes:
+                # Get location for Word document
+                docx_file_path = file_path.with_suffix('.docx')
+                docx_file_path, _ = QFileDialog.getSaveFileName(
+                    self, "Save Word Document",
+                    str(docx_file_path),
+                    "Word Files (*.docx)"
+                )
+                
+                if docx_file_path:
+                    docx_file_path = Path(docx_file_path)
+                    if docx_file_path.suffix != '.docx':
+                        docx_file_path = docx_file_path.with_suffix('.docx')
+                    
+                    # Move DOCX to user-selected location
+                    if Path(docx_path) != docx_file_path:
+                        shutil.move(docx_path, str(docx_file_path))
+                        docx_path = str(docx_file_path)
+                    
+                    QMessageBox.information(
+                        self, "Export Complete", 
+                        f"Documents exported:\nPDF: {pdf_path}\nWord: {docx_path}"
+                    )
+                else:
+                    # User cancelled Word save, clean up temp DOCX
+                    if Path(docx_path).exists():
+                        Path(docx_path).unlink()
+                    QMessageBox.information(
+                        self, "Export Complete", 
+                        f"PDF exported: {pdf_path}"
+                    )
+            else:
+                # User doesn't want Word, clean up temp DOCX
+                if Path(docx_path).exists():
+                    Path(docx_path).unlink()
+                QMessageBox.information(
+                    self, "Export Complete", 
+                    f"PDF exported: {pdf_path}"
+                )
+                
         except Exception as e:
             traceback.print_exc()
-            QMessageBox.critical(self, "Export failed", f"Failed to export PDF:\n{e}")
+            QMessageBox.critical(self, "Export failed", f"Failed to export:\n{e}")
 
     def _view_letter(self) -> None:
         # Sync current UI values into the document model for preview/export
@@ -1717,6 +1964,21 @@ class EditorWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addWidget(QLabel("List"))
         toolbar.addWidget(self._list_combo)
+
+        toolbar.addSeparator()
+        toolbar.addWidget(QLabel("Table"))
+
+        self._table_border_combo = QComboBox(self)
+        self._table_border_combo.addItems(["Border 0", "Border 1", "Border 2", "Border 3", "Border 4"])
+        self._table_border_combo.setCurrentIndex(1)
+        self._table_border_combo.currentIndexChanged.connect(self._on_table_border_changed)
+        toolbar.addWidget(self._table_border_combo)
+
+        self._table_width_combo = QComboBox(self)
+        self._table_width_combo.addItems(["Width 50%", "Width 75%", "Width 100%"])
+        self._table_width_combo.setCurrentIndex(2)
+        self._table_width_combo.currentIndexChanged.connect(self._on_table_width_changed)
+        toolbar.addWidget(self._table_width_combo)
 
 
     def _insert_table(self) -> None:
@@ -1875,26 +2137,106 @@ class EditorWindow(QMainWindow):
 
     def _on_list_type_changed(self, index: int) -> None:
         cursor = self._editor.textCursor()
-        
-        # Remove any existing list formatting first
-        if cursor.currentList():
-            cursor.currentList().remove(cursor.block())
-        
-        # Apply new list formatting based on selection
-        if index == 1:  # Bullets
-            cursor.insertList(QTextListFormat.ListDisc)
-        elif index == 2:  # Numbers (1, 2, 3)
-            cursor.insertList(QTextListFormat.ListDecimal)
-        elif index == 3:  # Letters (a, b, c)
-            cursor.insertList(QTextListFormat.ListLowerAlpha)
-        elif index == 4:  # Roman (I, II, III)
-            cursor.insertList(QTextListFormat.ListUpperRoman)
+
+        if index == 0:
+            self._remove_list_from_selection(cursor)
+        else:
+            style = QTextListFormat.ListDisc
+            if index == 2:
+                style = QTextListFormat.ListDecimal
+            elif index == 3:
+                style = QTextListFormat.ListLowerAlpha
+            elif index == 4:
+                style = QTextListFormat.ListUpperRoman
+            self._apply_list_to_selection(cursor, style)
         
         # Reset dropdown to "None" after applying
         if index != 0:
             self._list_combo.blockSignals(True)
             self._list_combo.setCurrentIndex(0)
             self._list_combo.blockSignals(False)
+
+    def _apply_list_to_selection(self, cursor: QTextCursor, style: int) -> None:
+        doc = self._editor.document()
+        cur = QTextCursor(doc)
+
+        if cursor.hasSelection():
+            start = min(cursor.selectionStart(), cursor.selectionEnd())
+            end = max(cursor.selectionStart(), cursor.selectionEnd())
+            cur.setPosition(start)
+            start_block = cur.block().position()
+
+            cur.setPosition(end)
+            end_block = cur.block().position()
+        else:
+            start_block = cursor.block().position()
+            end_block = start_block
+
+        lf = QTextListFormat()
+        lf.setStyle(style)
+
+        cur.beginEditBlock()
+
+        cur.setPosition(start_block)
+        list_obj = cur.createList(lf)
+
+        block = doc.findBlock(start_block)
+        while block.isValid() and block.position() <= end_block:
+            if block.text().strip() or True:
+                list_obj.add(block)
+            block = block.next()
+
+        cur.endEditBlock()
+
+    def _remove_list_from_selection(self, cursor: QTextCursor) -> None:
+        doc = self._editor.document()
+        cur = QTextCursor(doc)
+
+        if cursor.hasSelection():
+            start = min(cursor.selectionStart(), cursor.selectionEnd())
+            end = max(cursor.selectionStart(), cursor.selectionEnd())
+            cur.setPosition(start)
+            start_block = cur.block().position()
+
+            cur.setPosition(end)
+            end_block = cur.block().position()
+
+            cur.setPosition(start_block)
+            cur.setPosition(end_block + cur.block().length() - 1, QTextCursor.KeepAnchor)
+        else:
+            cur = cursor
+
+        cur.beginEditBlock()
+        bfmt = QTextBlockFormat()
+        bfmt.setObjectIndex(-1)
+        cur.setBlockFormat(bfmt)
+        cur.endEditBlock()
+
+    def _on_table_border_changed(self, index: int) -> None:
+        cursor = self._editor.textCursor()
+        table = cursor.currentTable()
+        if table is None:
+            return
+        border = int(index)
+        tf = table.format()
+        tf.setBorder(border)
+        tf.setBorderStyle(QTextTableFormat.BorderStyle_Solid)
+        tf.setBorderBrush(QBrush(QColor("black")))
+        table.setFormat(tf)
+
+    def _on_table_width_changed(self, index: int) -> None:
+        cursor = self._editor.textCursor()
+        table = cursor.currentTable()
+        if table is None:
+            return
+        pct = 100.0
+        if index == 0:
+            pct = 50.0
+        elif index == 1:
+            pct = 75.0
+        tf = table.format()
+        tf.setWidth(QTextLength(QTextLength.PercentageLength, pct))
+        table.setFormat(tf)
 
     def _on_font_family_changed(self, font: QFont) -> None:
         fmt = QTextCharFormat()

@@ -1,0 +1,5 @@
+PyQt5>=5.15.0
+Pillow>=9.0
+python-docx>=0.8.11
+pywin32>=304
+pyinstaller>=5.0

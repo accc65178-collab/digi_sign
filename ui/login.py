@@ -220,8 +220,8 @@ class LoginDialog(QDialog):
         root.addWidget(self._bg)
         self.setLayout(root)
 
-        self._username.returnPressed.connect(self._on_login)
-        self._password.returnPressed.connect(self._on_login)
+        # Only connect button click, not returnPressed to avoid duplicates
+        # The login button is already set as default, so Enter will trigger it
 
     def _open_forgot_password(self) -> None:
         # Strict guard: only proceed if the sender is exactly the Forgot Password button

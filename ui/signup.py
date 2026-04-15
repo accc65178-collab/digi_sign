@@ -65,6 +65,11 @@ class SignupDialog(QDialog):
         self._password.setEchoMode(QLineEdit.Password)
         self._password.setObjectName("LoginInput")
 
+        self._confirm_password = QLineEdit(self._card)
+        self._confirm_password.setPlaceholderText("Confirm password")
+        self._confirm_password.setEchoMode(QLineEdit.Password)
+        self._confirm_password.setObjectName("LoginInput")
+
         self._submit = QPushButton("Sign up", self._card)
         self._submit.setObjectName("LoginButton")
         self._submit.clicked.connect(self._on_submit)
@@ -90,6 +95,8 @@ class SignupDialog(QDialog):
         card_layout.addWidget(self._designation)
         card_layout.addWidget(QLabel("Password", self._card))
         card_layout.addWidget(self._password)
+        card_layout.addWidget(QLabel("Confirm Password", self._card))
+        card_layout.addWidget(self._confirm_password)
         card_layout.addWidget(self._submit)
         card_layout.addWidget(self._cancel)
         self._card.setLayout(card_layout)
@@ -126,6 +133,7 @@ class SignupDialog(QDialog):
         self._lab.returnPressed.connect(self._on_submit)
         self._designation.returnPressed.connect(self._on_submit)
         self._password.returnPressed.connect(self._on_submit)
+        self._confirm_password.returnPressed.connect(self._on_submit)
 
     def showEvent(self, event) -> None:
         super().showEvent(event)
@@ -153,6 +161,7 @@ class SignupDialog(QDialog):
         lab = self._lab.text().strip()
         designation = self._designation.text().strip()
         password = self._password.text()
+        confirm_password = self._confirm_password.text()
         if not full_name:
             QMessageBox.warning(self, "Missing", "Full name is required")
             return
@@ -170,6 +179,10 @@ class SignupDialog(QDialog):
             return
         if not password:
             QMessageBox.warning(self, "Missing", "Password is required")
+            return
+
+        if password != confirm_password:
+            QMessageBox.warning(self, "Mismatch", "Password and Confirm Password do not match")
             return
 
         try:
